@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import zlib
 from html import escape
 
 from ..ir import Drawing, Shape
@@ -181,6 +182,7 @@ def _render_shape(s: Shape, index: int, markers: dict, render_blocks, image_src)
 
     if s.is_line:
         color = _safe_color(s.stroke) or "#000000"
+        d = s.path or line_path(s)
         mid = markers.setdefault(color, f"kp-arrow-{len(markers)}")
         m = ""
         if s.tail_arrow:
@@ -188,8 +190,22 @@ def _render_shape(s: Shape, index: int, markers: dict, render_blocks, image_src)
         if s.head_arrow:
             m += f' marker-start="url(#{mid})"'
         parts.append(
-            f'<path d="{line_path(s)}" fill="none" stroke="{color}" stroke-width="{_f(s.stroke_width_pt)}"{dash}{m}/>'
+            f'<path d="{d}" fill="none" stroke="{color}" stroke-width="{_f(max(s.stroke_width_pt, 0.75))}"{dash}{m}/>'
         )
+    elif s.image_id and (s.path or s.geometry not in ("rect",)):
+        # 그림으로 채운 도형: 도형 모양으로 잘라 그림을 넣고 테두리를 그린다
+        d = s.path or preset_path(s.geometry, s.x, s.y, s.width, s.height)[0]
+        src = image_src(s.image_id)
+        # 같은 경로면 같은 id가 되어도 잘리는 모양이 같으므로 문제없다 (hash()는 실행마다 달라 쓰지 않는다)
+        cid = f"kp-clip-{zlib.crc32(d.encode()):08x}"
+        if _safe_color(s.fill):  # 그림 아래 바탕색
+            parts.append(f'<path d="{d}" fill="{s.fill}" stroke="none"/>')
+        if src:
+            parts.append(f'<clipPath id="{cid}"><path d="{d}"/></clipPath>'
+                         f'<image href="{escape(src)}" x="{_f(s.x)}" y="{_f(s.y)}" width="{_f(s.width)}" '
+                         f'height="{_f(s.height)}" preserveAspectRatio="none" clip-path="url(#{cid})"/>')
+        stroke = _safe_color(s.stroke) or "none"
+        parts.append(f'<path d="{d}" fill="none" stroke="{stroke}" stroke-width="{_f(max(s.stroke_width_pt, 0.75))}"{dash}/>')
     elif s.image_id:
         src = image_src(s.image_id)
         if src:
@@ -206,7 +222,8 @@ def _render_shape(s: Shape, index: int, markers: dict, render_blocks, image_src)
             parts[0] = parts[0].replace(">", ' data-approximate="true">', 1)
         fill = _safe_color(s.fill) or "none"
         stroke = _safe_color(s.stroke) or "none"
-        parts.append(f'<path d="{d}" fill="{fill}" stroke="{stroke}" stroke-width="{_f(s.stroke_width_pt)}"{dash}/>')
+        # 0.75pt(1px)보다 얇은 선은 화면에서 흐려지므로 최소 1px로 그린다 (한컴·Word도 그렇게 표시)
+        parts.append(f'<path d="{d}" fill="{fill}" stroke="{stroke}" stroke-width="{_f(max(s.stroke_width_pt, 0.75))}"{dash}/>')
         if s.geometry == "flowChartPredefinedProcess":
             o = s.width * 0.1
             for xx in (s.x + o, s.x + s.width - o):

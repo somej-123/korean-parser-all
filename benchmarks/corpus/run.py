@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""여러 DOCX를 한꺼번에 파싱·렌더링해서 실패, 경고, 처리 시간, 추출 요소 수를 집계한다.
+"""여러 문서(DOCX, HWPX)를 한꺼번에 파싱·렌더링해서 실패, 경고, 처리 시간, 추출 요소 수를 집계한다.
 
     ./fetch_samples.sh samples_web
     python run.py samples_web --out corpus_report.md
@@ -45,7 +45,12 @@ def main() -> int:
     p.add_argument("--out", default="corpus_report.md")
     args = p.parse_args()
 
-    files = sorted(Path(args.folder).rglob("*.docx"))
+    root = Path(args.folder)
+    files = sorted(
+        f for f in root.rglob("*")
+        if f.suffix.lower() in (".docx", ".hwpx")
+        and not any(part.startswith(".") for part in f.relative_to(root).parts)  # 내려받기용 원본 저장소 제외
+    )
     ok, failed, times = [], [], []
     total = Counter()
     warnings = Counter()
@@ -65,9 +70,10 @@ def main() -> int:
             warnings[w.split(":")[0]] += 1
 
     lines = [
-        "# DOCX 코퍼스 실행 결과",
+        "# 문서 코퍼스 실행 결과",
         "",
-        f"- 문서 {len(files)}개 중 성공 {len(ok)}개, 실패 {len(failed)}개",
+        f"- 문서 {len(files)}개 (DOCX {sum(f.suffix.lower() == '.docx' for f in files)}, "
+        f"HWPX {sum(f.suffix.lower() == '.hwpx' for f in files)}) 중 성공 {len(ok)}개, 실패 {len(failed)}개",
         f"- 문서당 처리 시간(파싱+HTML+LLM): 중앙값 {statistics.median(times) * 1000:.0f}ms, "
         f"최대 {max(times) * 1000:.0f}ms" if times else "",
         "",

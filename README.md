@@ -14,20 +14,28 @@
 | 형식 | 상태 | 방식 |
 |---|---|---|
 | DOCX | ✅ v0.2 | XML 규칙 파싱 (AI 없음) |
-| HWPX | 다음 단계 | XML 규칙 파싱 |
+| HWPX | ✅ v0.3 | XML 규칙 파싱 (AI 없음) |
 | PDF | 후처리만 지원 | Docling + 한국어 후처리 (`docling_adapter`) |
-| HWP, PPTX, XLSX | 예정 | |
+| HWP(5.0), PPTX, XLSX | 예정 | |
 
-DOCX에서 읽는 것: 제목 계층, 글자 서식(굵게·색·크기·밑줄·대문자), 문단 서식(정렬·들여쓰기·간격·테두리),
+**DOCX**: 제목 계층, 글자 서식(굵게·색·크기·밑줄·대문자), 문단 서식(정렬·들여쓰기·간격·테두리),
 자동 번호(가나다·원문자 등 한국어 형식 포함), 표(가로·세로 병합, 배경, 테두리, 중첩 표),
 이미지, 도형·순서도(SVG로 렌더링), 차트(막대·꺾은선·원형 등), 떠 있는 개체 배치,
 각주·미주, 머리말·꼬리말, 하이퍼링크, 양식 체크박스, 기호 글꼴.
+
+**HWPX (한글)**: 글자 모양(자간·형광펜 포함), 문단 모양(여백·줄 간격·문단 테두리), 개요 번호(→ 제목 계층),
+문단 번호·글머리표(1. → 가. → 1) → 가), ①, ㉮ 등), 표(병합, 칸별 테두리·배경, 떠 있는 표),
+그리기 개체(사각형·타원·호·선·다각형·곡선·연결선·묶음 개체, 회전·뒤집기 포함), 그림·그림 채우기,
+쪽 배경, 수식(원문 수식 스크립트), 차트, 머리말·꼬리말, 각주, 하이퍼링크, 변경 추적(삭제 내용 제외), 양식 개체.
+
+![HWPX: 한컴오피스 미리보기(왼쪽)와 HTML 결과(오른쪽)](docs/images/hwpx_project_plan_compare.png)
 
 ## 사용법
 
 ```bash
 pip install -e ".[dev]"
 python -m korean_parser convert 문서.docx -o out/      # out/문서.html, 문서.llm.md, 문서.json
+python -m korean_parser convert 보고서.hwpx -o out/
 ```
 
 ```python
@@ -35,7 +43,8 @@ from korean_parser.parsers import parse
 from korean_parser.render.html import render_html
 from korean_parser.render.llm import render_llm
 
-doc = parse("보고서.docx")          # 통합 문서 모델 (pydantic, JSON 저장 가능)
+doc = parse("보고서.hwpx")          # 통합 문서 모델 (pydantic, JSON 저장 가능). DOCX도 같은 방법
+
 html = render_html(doc)             # 한 파일로 완결된 HTML (CSS·이미지 포함)
 text = render_llm(doc)              # LLM 입력용 텍스트
 ```
@@ -66,13 +75,13 @@ LLM 출력 예 ([`tests/fixtures/korean_report.docx`](tests/fixtures/)):
 | 경로 | 내용 |
 |---|---|
 | [`korean_parser/ir.py`](korean_parser/ir.py) | 통합 문서 모델 |
-| [`korean_parser/parsers/`](korean_parser/parsers/) | 단일 입구 `parse()`와 형식별 파서 (DOCX) |
+| [`korean_parser/parsers/`](korean_parser/parsers/) | 단일 입구 `parse()`와 형식별 파서 (DOCX, HWPX) |
 | [`korean_parser/render/`](korean_parser/render/) | HTML, LLM 텍스트, SVG(도형·차트) 렌더러 |
 | [`korean_parser/enrich.py`](korean_parser/enrich.py) | 한국어 처리 레이어를 문서 모델에 적용 |
 | `korean_parser/normalize.py`, `spacing.py`, `outline.py` | 문자 정규화, 띄어쓰기 복원, 개조식 계층 인식 |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 설계와 단계별 계획 |
 | [`benchmarks/visual-compare/`](benchmarks/visual-compare/) | 원본 vs HTML 시각 비교 |
-| [`benchmarks/docx-corpus/`](benchmarks/docx-corpus/) | 웹 DOCX 131개 일괄 실행 (정상 문서 115개 전부 성공) |
+| [`benchmarks/corpus/`](benchmarks/corpus/) | 웹 문서 180개(DOCX 131, HWPX 49) 일괄 실행. 정상 문서 164개 전부 성공 |
 | [`benchmarks/korean-postprocess/`](benchmarks/korean-postprocess/) | PDF 띄어쓰기 복원 평가 (F1 0.459 → 0.991) |
 | [`benchmarks/docling-cpu/`](benchmarks/docling-cpu/) | Docling CPU 속도 벤치마크 |
 
@@ -106,13 +115,23 @@ postprocess_docling(doc)
 
 형태소 분석기 [Kiwi](https://github.com/bab2min/Kiwi)(kiwipiepy, Apache-2.0)를 사용합니다.
 
-## 알려진 한계 (DOCX)
+HWPX를 LLM 텍스트로 바꿀 때는 한글 문서의 관행을 반영합니다. 제목 상자나 강조 상자로 쓰이는
+1열짜리 표는 표가 아닌 글로 풀고, 직접 입력한 번호(1. 가. 1))와 개조식 기호는 계층에 맞춰 들여씁니다.
 
+## 알려진 한계
+
+공통
 - 쪽 나눔 없이 한 화면으로 이어서 보여줍니다. 머리말·꼬리말은 첫 페이지 것만 표시합니다.
 - EMF/WMF 이미지는 브라우저가 표시하지 못해 회색 상자로 대체합니다.
 - 다단(단 나누기), 탭 위치 정렬, 글꼴이 없는 환경에서의 글자 폭 차이는 원본과 다를 수 있습니다.
 - Office 2016 신형 차트(chartex)는 아직 읽지 않습니다.
 - SmartArt는 Word가 저장해 둔 그리기 결과를 도형으로 읽도록 구현했지만, 테스트 문서가 없어 아직 검증하지 못했습니다.
+
+HWPX
+- 다단(단 나누기), 바탕쪽(master page), 글상자 연결, 세로쓰기는 아직 반영하지 않습니다.
+- 수식은 한글 수식 스크립트 원문(`{a} over {b}`)으로 보여 줍니다. 수식 렌더링(LaTeX 변환)은 예정입니다.
+- 그림 자르기, 장평(글자 폭), 그림 효과(그림자·반사)는 표시하지 않습니다.
+- OLE 개체·동영상은 표시하지 않습니다.
 
 ## 라이선스
 

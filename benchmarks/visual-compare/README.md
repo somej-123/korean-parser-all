@@ -1,7 +1,10 @@
 # 원본 vs HTML 시각 비교
 
-원본 문서를 LibreOffice로 렌더링한 이미지와, `korean_parser`가 만든 HTML을 Chromium으로 캡처한 이미지를
+원본 문서를 렌더링한 이미지와, `korean_parser`가 만든 HTML을 Chromium으로 캡처한 이미지를
 나란히 붙인다. "후처리 없이 원본처럼 보이는가"를 눈으로 확인하는 도구다.
+
+- DOCX: LibreOffice로 PDF 변환 후 페이지 이미지
+- HWPX: 파일 안의 미리보기(`Preview/PrvImage.png`). 한컴오피스가 직접 그린 첫 페이지라 가장 정확한 기준이다
 
 ```bash
 pip install -e "../..[dev]" playwright
@@ -12,7 +15,27 @@ python compare.py 문서폴더/*.docx -o out/ --pages 2
 필요: LibreOffice(`soffice`), Chromium(Playwright). LibreOffice 렌더링도 Word와 완전히 같지는 않으므로
 "대략적인 기준"으로 본다.
 
-## 예시
+## 예시 (HWPX)
+
+보고서 서식 (쪽 배경 그림, 떠 있는 표, 흰 글씨 표 머리):
+
+![](../../docs/images/hwpx_project_plan_compare.png)
+
+구청 행사 용역 제안요청서 표지:
+
+![](../../docs/images/hwpx_gangbuk_rfp_compare.png)
+
+글머리표·문단 번호·개요 번호:
+
+![](../../docs/images/hwpx_numbering_compare.png)
+
+그리기 개체 (묶음 개체, 꺾인 연결선, 회전한 다각형과 그림 채우기):
+
+![](../../docs/images/hwpx_shapes_compare.png)
+
+HWPX 예시 파일은 [hwpxlib](https://github.com/neolord0/hwpxlib) 테스트 문서(Apache-2.0)다.
+
+## 예시 (DOCX)
 
 한국어 보고서 (개조식, 가나다 번호, 병합 표, 이미지, 순서도):
 

@@ -147,6 +147,7 @@ class Numbering:
             token = f"%{i + 1}"
             if token in text:
                 li = levels.get(i)
-                n = counters.get(i, (overrides.get(i, li.start) if li else 1))
+                # 건너뛴 상위 단계는 시작값으로 확정해 두어야 다음 번호가 이어진다
+                n = counters.setdefault(i, overrides.get(i, li.start) if li else 1)
                 text = text.replace(token, format_number(n, li.fmt if li else "decimal"))
         return text, True, lvl.ppr

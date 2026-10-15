@@ -47,6 +47,8 @@ class TextStyle(_Model):
     font: str | None = None
     vertical: Literal["super", "sub"] | None = None
     caps: Literal["all", "small"] | None = None  # 모두 대문자 / 작은 대문자로 표시 (원문 글자는 그대로)
+    letter_spacing_em: float | None = None  # 자간 (글자 크기 대비, -0.05 = -5%)
+    width_ratio: float | None = None  # 장평 (1.0 = 100%)
 
 
 class ParagraphStyle(_Model):
@@ -110,7 +112,15 @@ class NoteRef(_Model):
     label: str
 
 
-Inline = Annotated[Union[Text, Break, Tab, ImageRef, NoteRef], Field(discriminator="type")]
+class Equation(_Model):
+    """수식. script는 원본 형식의 수식 문자열 (HWP 수식 편집기 문법 또는 LaTeX)."""
+
+    type: Literal["equation"] = "equation"
+    script: str
+    syntax: Literal["hwp", "latex", "mathml"] = "hwp"
+
+
+Inline = Annotated[Union[Text, Break, Tab, ImageRef, NoteRef, Equation], Field(discriminator="type")]
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +198,7 @@ class Table(_Block):
     width_pt: float | None = None
     align: Literal["left", "center", "right"] | None = None
     cell_padding_pt: tuple[float, float, float, float] | None = None  # top, right, bottom, left
+    anchor: Anchor | None = None  # 본문 흐름 밖에 떠 있는 표 (HWP에서 흔함)
 
     @property
     def has_merged_cells(self) -> bool:
@@ -332,6 +343,8 @@ class PageSetup(_Model):
     margin_bottom_pt: float = 72
     margin_left_pt: float = 72
     margin_right_pt: float = 72
+    background: str | None = None  # 쪽 배경색
+    background_image_id: str | None = None  # 쪽 배경 그림 (쪽 전체 크기로 늘림)
 
 
 class Meta(_Model):

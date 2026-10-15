@@ -13,8 +13,8 @@ from __future__ import annotations
 from html import escape
 
 from ..ir import (
-    Block, Chart, Document, Drawing, Figure, Heading, ImageRef, NoteRef, PageBreak, Paragraph, Shape,
-    Table, Text, inline_text,
+    Block, Equation, Chart, Document, Drawing, Figure, Heading, ImageRef, NoteRef, PageBreak, Paragraph, Shape,
+    Table, Text, _walk, inline_text,
 )
 
 
@@ -23,9 +23,14 @@ def render_llm(doc: Document, with_ids: bool = True) -> str:
 
 
 class LlmRenderer:
-    def __init__(self, doc: Document, with_ids: bool = True):
+    def __init__(self, doc: Document, with_ids: bool = True, _all_shapes: list[Shape] | None = None):
         self.doc = doc
         self.with_ids = with_ids
+        # HWP는 도형과 연결선이 서로 다른 개체이므로, 연결 대상은 문서 전체에서 찾는다 (한 번만 모은다)
+        if _all_shapes is None:
+            _all_shapes = [s for b in doc.iter_blocks() if isinstance(b, Drawing) for s in b.shapes]
+        self._all_shapes = _all_shapes
+        self._inner: LlmRenderer | None = None
 
     def render(self) -> str:
         m = self.doc.meta
@@ -86,6 +91,8 @@ class LlmRenderer:
                 out.append(f"[이미지{': ' + i.alt if i.alt else ''} ({i.image_id})]" if img else "")
             elif isinstance(i, NoteRef):
                 out.append(f"[^{i.label}]")
+            elif isinstance(i, Equation):
+                out.append(f"[수식: {i.script}]")
             else:
                 out.append(inline_text([i]))
         return "".join(out)
@@ -97,28 +104,25 @@ class LlmRenderer:
         """표 셀, 도형, 각주 안의 블록. 바깥 블록에 id가 있으므로 안쪽에는 달지 않는다."""
         if not self.with_ids:
             return self.blocks(blocks)
-        return LlmRenderer(self.doc, with_ids=False).blocks(blocks)
+        if self._inner is None:
+            self._inner = LlmRenderer(self.doc, with_ids=False, _all_shapes=self._all_shapes)
+        return self._inner.blocks(blocks)
 
     # ------------------------------------------------------------------
 
     def _table(self, t: Table) -> str:
+        # 한 열짜리 표는 제목 상자·강조 상자로 쓰인 경우가 대부분이다 (한글 문서에서 흔함). 글로 풀어 쓴다.
+        if t.rows and all(len(r.cells) == 1 for r in t.rows):
+            # 안쪽 문단이 각자 id를 달고 있으므로 표 id는 따로 달지 않는다
+            parts = (self.blocks(c.blocks) for r in t.rows for c in r.cells)
+            return "\n\n".join(p for p in parts if p.strip())
+
         complex_cells = any(
             len(c.blocks) > 1 or any(isinstance(x, (Table, Drawing)) for x in c.blocks)
             for r in t.rows for c in r.cells
         )
         if t.has_merged_cells or complex_cells:
-            rows = []
-            for r in t.rows:
-                cells = []
-                for c in r.cells:
-                    span = (f' rowspan="{c.row_span}"' if c.row_span > 1 else "") + (
-                        f' colspan="{c.col_span}"' if c.col_span > 1 else ""
-                    )
-                    inner = self._nested(c.blocks)
-                    inner = escape(inner).replace("\n\n", "<br>").replace("\n", "<br>")
-                    cells.append(f"<td{span}>{inner}</td>")
-                rows.append("<tr>" + "".join(cells) + "</tr>")
-            return f"<table>{''.join(rows)}</table>{self._tag(t)}"
+            return self._html_table(t) + self._tag(t)
 
         rows = [[" ".join(self._plain(c.blocks).split()).replace("|", "\\|") for c in r.cells] for r in t.rows]
         if not rows:
@@ -129,16 +133,38 @@ class LlmRenderer:
         lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
         return "\n".join(lines) + self._tag(t)
 
+    def _html_table(self, t: Table) -> str:
+        """병합 셀이나 셀 안 표가 있는 표. 셀 안의 표는 HTML 표로 중첩한다."""
+        rows = []
+        for r in t.rows:
+            cells = []
+            for c in r.cells:
+                span = (f' rowspan="{c.row_span}"' if c.row_span > 1 else "") + (
+                    f' colspan="{c.col_span}"' if c.col_span > 1 else ""
+                )
+                parts = []
+                for b in c.blocks:
+                    if isinstance(b, Table):
+                        parts.append(self._html_table(b))
+                    else:
+                        text = self._nested([b])
+                        if text.strip():
+                            parts.append(escape(text).replace("\n", "<br>"))
+                cells.append(f"<td{span}>{'<br>'.join(parts)}</td>")
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+        return f"<table>{''.join(rows)}</table>"
+
     def _drawing(self, d: Drawing) -> str:
         boxes = [s for s in d.shapes if not s.is_line and (s.text_blocks or s.image_id)]
         lines = [s for s in d.shapes if s.is_line]
         names = {}
-        for s in boxes:
-            names[id(s)] = self._plain(s.text_blocks) or (f"이미지 {s.image_id}" if s.image_id else "")
+        for s in self._all_shapes:
+            if not s.is_line and (s.text_blocks or s.image_id):
+                names[id(s)] = _shape_label(s)
 
         edges = []
         for ln in lines:
-            a, b = _endpoints(ln, d.shapes)
+            a, b = _endpoints(ln, d.shapes, self._all_shapes)
             if a is not None and b is not None and names.get(id(a)) and names.get(id(b)):
                 if ln.head_arrow and not ln.tail_arrow:
                     a, b = b, a
@@ -165,9 +191,12 @@ class LlmRenderer:
         return "\n".join([title, head, sep, *rows])
 
 
-def _endpoints(line: Shape, shapes: list[Shape]):
-    """연결선 양 끝이 닿은 도형. 연결 정보(stCxn/endCxn)가 있으면 그것을, 없으면 좌표로 찾는다."""
-    by_id = {s.id: s for s in shapes if s.id}
+def _endpoints(line: Shape, shapes: list[Shape], all_shapes: list[Shape] | None = None):
+    """연결선 양 끝이 닿은 도형. 연결 정보(stCxn/endCxn)가 있으면 그것을, 없으면 좌표로 찾는다.
+
+    좌표 비교는 같은 캔버스(shapes) 안에서만 의미가 있고, id 연결은 문서 전체(all_shapes)에서 찾는다.
+    """
+    by_id = {s.id: s for s in (all_shapes or shapes) if s.id}
     a = by_id.get(line.connect_from) if line.connect_from else None
     b = by_id.get(line.connect_to) if line.connect_to else None
     if a is not None and b is not None:
@@ -228,3 +257,10 @@ def _flow_order(boxes: list[Shape], edges) -> list[Shape]:
         order.append(s)
         queue.extend(sorted((n for n in nexts.get(id(s), []) if id(n) not in seen), key=lambda n: (n.y, n.x)))
     return order
+
+
+def _shape_label(s: Shape) -> str:
+    """도형 이름 = 안에 든 글자. 글상자 안에 도형이 또 있어도 글자만 모은다 (렌더링하지 않으므로 재귀 없음)."""
+    texts = [b.text for b in _walk(s.text_blocks) if isinstance(b, (Paragraph, Heading)) and b.text.strip()]
+    label = " ".join(" ".join(texts).split())
+    return label or (f"이미지 {s.image_id}" if s.image_id else "")

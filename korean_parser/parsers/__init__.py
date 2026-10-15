@@ -22,8 +22,15 @@ def _docx(path: Path) -> Document:
     return parse_docx(path)
 
 
+def _hwpx(path: Path) -> Document:
+    from .hwpx import parse_hwpx
+
+    return parse_hwpx(path)
+
+
 _PARSERS = {
     "docx": _docx,
+    "hwpx": _hwpx,
 }
 
 

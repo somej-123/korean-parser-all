@@ -10,13 +10,13 @@
 ## 구조
 
 ```
-입력 (DOCX ✅, HWPX, HWP, PPTX, XLSX, PDF, 이미지)
+입력 (DOCX ✅, HWPX ✅, HWP, PPTX, XLSX, PDF, 이미지)
   │
   ▼
 parsers.parse(path)                 ← 단일 입구. 형식 판별 후 형식별 파서 호출
   │                                    손상·암호화 파일은 DocumentError(사용자용 메시지)
   ├─ parsers/docx/   XML 규칙 파싱 (AI 없음)
-  ├─ parsers/hwpx/   (예정)
+  ├─ parsers/hwpx/   XML 규칙 파싱 (AI 없음)
   └─ parsers/pdf/    (예정: Docling 레이아웃·표 + OCR → IR 어댑터)
   │
   ▼
@@ -46,6 +46,8 @@ render/
 | `Drawing` | 도형(`Shape`: 모양, 좌표, 회전, 채우기, 선, 화살표, 연결 대상, 글상자), 떠 있는 배치(`Anchor`) |
 | `Chart` | 종류, 방향, 묶음/누적, 범주, 계열 값과 색 |
 | `Figure`, `ImageRef` | 이미지(원본 바이트를 base64로 보관), 크기, 대체 텍스트 |
+| `Equation` | 수식 원문 (한글 수식 스크립트 / LaTeX) |
+| `Anchor` | 떠 있는 표·도식의 배치 (글 옆으로 흐름 / 위아래 / 글 앞·뒤로 겹침, 기준과 위치) |
 | `Note` | 각주·미주 |
 | `Provenance` | 어떤 파서가 원본의 어디(페이지, 좌표)에서 만들었는지, 신뢰도 |
 
@@ -66,13 +68,24 @@ render/
 - 도형은 SVG, 도형 안 글은 `foreignObject`의 HTML(한국어 자동 줄바꿈 때문).
 - 떠 있는 개체: 글이 옆으로 흐르면 `float`, 글과 겹치면 페이지 기준 `position:absolute`.
 
+## HWPX 파싱에서 알아 둘 점
+
+- HWP는 스타일 상속이 없다. 문단·글자가 가리키는 문단 모양(`paraPr`)과 글자 모양(`charPr`)에 값이 모두 들어 있다.
+- 문단 여백은 `hp:switch` 안에 두 벌로 저장된다. `hp:default`(구버전 호환)는 실제의 **2배** 값이므로 `hp:case`를 쓴다.
+- 그리기 개체는 원래 크기(`orgSz`) 좌표에 `renderingInfo` 행렬(이동 · 확대·회전 쌍 …)을 곱해 위치를 얻는다.
+  묶음 개체 안의 행렬은 이미 묶음 좌표계 기준이다.
+- 연결선의 `subjectIdx`(0 위, 1 오른쪽, 2 아래, 3 왼쪽)로 꺾인 연결선의 경로를 정한다.
+- 표 칸·글상자 안에서는 마지막 줄 뒤 줄 간격을 넣지 않는다 (HTML에서 `margin-block`으로 보정).
+- 개요 번호는 구역(`secPr`)의 `outlineShapeIDRef` 번호 정의를 쓰고, 건너뛴 상위 단계는 시작값으로 채운다.
+- 쪽 배경(`pageBorderFill`)에 그림 채우기를 쓰는 서식이 많다 (보고서 표지의 색 띠 등).
+
 ## 검증 방법
 
 | 도구 | 확인하는 것 |
 |---|---|
 | `pytest` | 파서·렌더러 단위 동작 (`tests/`) |
-| `benchmarks/docx-corpus/` | 웹에서 받은 DOCX 130여 개를 일괄 처리해 실패·경고·시간 집계 |
-| `benchmarks/visual-compare/` | 원본(LibreOffice 렌더링)과 우리 HTML(Chromium 캡처)을 나란히 비교 |
+| `benchmarks/corpus/` | 웹에서 받은 DOCX·HWPX 180개를 일괄 처리해 실패·경고·시간 집계 |
+| `benchmarks/visual-compare/` | 원본(DOCX는 LibreOffice, HWPX는 파일 안의 한컴오피스 미리보기)과 우리 HTML(Chromium)을 나란히 비교 |
 | `benchmarks/korean-postprocess/` | PDF 파싱 결과의 띄어쓰기 정확도 (DOCX 원본을 정답으로) |
 
 ## 단계
@@ -81,7 +94,7 @@ render/
 |---|---|---|
 | 0 | CPU 벤치마크, 한국어 후처리 v0 | 완료 |
 | 1 | IR + HTML 렌더러 + LLM 렌더러 + DOCX 파서 | 완료 (v0.2) |
-| 2 | HWPX 파서 (개조식, 표 병합, 도형 → SVG) | 다음 |
-| 3 | PDF: Docling 결과 → IR 어댑터, 벡터 도식 SVG 추출 | |
+| 2 | HWPX 파서 (개조식, 표 병합, 도형 → SVG) | 완료 (v0.3) |
+| 3 | PDF: Docling 결과 → IR 어댑터, 벡터 도식 SVG 추출 | 다음 |
 | 4 | 정답 세트와 요소별 평가 지표 (CER, TEDS, 읽기 순서) | |
 | 5 | HWP 5.0, PPTX, XLSX | |
