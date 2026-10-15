@@ -1,0 +1,230 @@
+"""IR → LLM 입력용 텍스트.
+
+원칙
+- 일반 텍스트와 단순한 표는 Markdown (토큰 절약)
+- 병합 셀이 있거나 셀 안에 표·여러 문단이 있는 표는 HTML <table> (구조 손실 방지)
+- 자동 번호와 개조식 기호는 원문 그대로 남기고, 계층은 들여쓰기로 표현
+- 도식은 도형 안 글자와 연결 관계("신청 → 검토")로 풀어 쓴다
+- 블록마다 id를 남겨 LLM 답변의 근거를 원문 위치로 되짚을 수 있게 한다 (with_ids)
+"""
+
+from __future__ import annotations
+
+from html import escape
+
+from ..ir import (
+    Block, Chart, Document, Drawing, Figure, Heading, ImageRef, NoteRef, PageBreak, Paragraph, Shape,
+    Table, Text, inline_text,
+)
+
+
+def render_llm(doc: Document, with_ids: bool = True) -> str:
+    return LlmRenderer(doc, with_ids).render()
+
+
+class LlmRenderer:
+    def __init__(self, doc: Document, with_ids: bool = True):
+        self.doc = doc
+        self.with_ids = with_ids
+
+    def render(self) -> str:
+        m = self.doc.meta
+        head = []
+        for key, val in (("title", m.title), ("author", m.author), ("created", m.created), ("source", m.source_name)):
+            if val:
+                head.append(f"{key}: {val}")
+        out = ["---\n" + "\n".join(head) + "\n---"] if head else []
+        body = self.blocks(self.doc.blocks)
+        out.append(body)
+        if self.doc.notes:
+            out.append("\n".join(
+                f"[^{n.label}]: {self._plain(n.blocks)}" for n in self.doc.notes.values()
+            ))
+        return "\n\n".join(x for x in out if x.strip()) + "\n"
+
+    def _tag(self, b) -> str:
+        return f"  <!-- {b.id} -->" if self.with_ids and getattr(b, "id", "") else ""
+
+    def blocks(self, blocks: list[Block], depth: int = 0) -> str:
+        parts = [self.block(b, depth) for b in blocks]
+        return "\n\n".join(p for p in parts if p)
+
+    def block(self, b: Block, depth: int = 0) -> str:
+        if isinstance(b, Heading):
+            marker = f"{b.list_info.marker} " if b.list_info else ""
+            return f"{'#' * min(b.level, 6)} {marker}{self.inlines(b.inlines).strip()}{self._tag(b)}"
+        if isinstance(b, Paragraph):
+            text = self.inlines(b.inlines).strip()
+            if not text:
+                return ""
+            if b.list_info:
+                indent = "  " * b.list_info.level
+                return f"{indent}{b.list_info.marker} {text}{self._tag(b)}"
+            if b.outline:
+                # 표지(□, 1.)는 이미 본문에 있으므로 들여쓰기만 더한다
+                return f"{'  ' * b.outline.level}{text}{self._tag(b)}"
+            return text + self._tag(b)
+        if isinstance(b, Table):
+            return self._table(b)
+        if isinstance(b, Drawing):
+            return self._drawing(b)
+        if isinstance(b, Chart):
+            return self._chart(b)
+        if isinstance(b, Figure):
+            return f"[그림{': ' + b.caption if b.caption else ''}]{self._tag(b)}"
+        if isinstance(b, PageBreak):
+            return ""
+        return ""
+
+    def inlines(self, inlines) -> str:
+        out = []
+        for i in inlines:
+            if isinstance(i, Text):
+                out.append(i.text)
+            elif isinstance(i, ImageRef):
+                img = self.doc.images.get(i.image_id)
+                out.append(f"[이미지{': ' + i.alt if i.alt else ''} ({i.image_id})]" if img else "")
+            elif isinstance(i, NoteRef):
+                out.append(f"[^{i.label}]")
+            else:
+                out.append(inline_text([i]))
+        return "".join(out)
+
+    def _plain(self, blocks) -> str:
+        return " ".join(self._nested(blocks).split())
+
+    def _nested(self, blocks) -> str:
+        """표 셀, 도형, 각주 안의 블록. 바깥 블록에 id가 있으므로 안쪽에는 달지 않는다."""
+        if not self.with_ids:
+            return self.blocks(blocks)
+        return LlmRenderer(self.doc, with_ids=False).blocks(blocks)
+
+    # ------------------------------------------------------------------
+
+    def _table(self, t: Table) -> str:
+        complex_cells = any(
+            len(c.blocks) > 1 or any(isinstance(x, (Table, Drawing)) for x in c.blocks)
+            for r in t.rows for c in r.cells
+        )
+        if t.has_merged_cells or complex_cells:
+            rows = []
+            for r in t.rows:
+                cells = []
+                for c in r.cells:
+                    span = (f' rowspan="{c.row_span}"' if c.row_span > 1 else "") + (
+                        f' colspan="{c.col_span}"' if c.col_span > 1 else ""
+                    )
+                    inner = self._nested(c.blocks)
+                    inner = escape(inner).replace("\n\n", "<br>").replace("\n", "<br>")
+                    cells.append(f"<td{span}>{inner}</td>")
+                rows.append("<tr>" + "".join(cells) + "</tr>")
+            return f"<table>{''.join(rows)}</table>{self._tag(t)}"
+
+        rows = [[" ".join(self._plain(c.blocks).split()).replace("|", "\\|") for c in r.cells] for r in t.rows]
+        if not rows:
+            return ""
+        width = max(len(r) for r in rows)
+        rows = [r + [""] * (width - len(r)) for r in rows]
+        lines = ["| " + " | ".join(rows[0]) + " |", "|" + "---|" * width]
+        lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
+        return "\n".join(lines) + self._tag(t)
+
+    def _drawing(self, d: Drawing) -> str:
+        boxes = [s for s in d.shapes if not s.is_line and (s.text_blocks or s.image_id)]
+        lines = [s for s in d.shapes if s.is_line]
+        names = {}
+        for s in boxes:
+            names[id(s)] = self._plain(s.text_blocks) or (f"이미지 {s.image_id}" if s.image_id else "")
+
+        edges = []
+        for ln in lines:
+            a, b = _endpoints(ln, d.shapes)
+            if a is not None and b is not None and names.get(id(a)) and names.get(id(b)):
+                if ln.head_arrow and not ln.tail_arrow:
+                    a, b = b, a
+                arrow = "↔" if ln.head_arrow and ln.tail_arrow else "→" if (ln.head_arrow or ln.tail_arrow) else "—"
+                edges.append((a, arrow, b))
+
+        out = [f"[도식{': ' + d.alt if d.alt else ''}]{self._tag(d)}"]
+        for s in _flow_order(boxes, edges):
+            if names[id(s)]:
+                out.append(f"- {names[id(s)]}")
+        if edges:
+            out.append("연결:")
+            out.extend(f"- {names[id(a)]} {arrow} {names[id(b)]}" for a, arrow, b in edges)
+        return "\n".join(out)
+
+    def _chart(self, c: Chart) -> str:
+        head = "| 항목 | " + " | ".join(s.name or f"계열{i + 1}" for i, s in enumerate(c.series)) + " |"
+        sep = "|---|" + "---|" * len(c.series)
+        rows = []
+        for i, cat in enumerate(c.categories):
+            vals = [("" if i >= len(s.values) or s.values[i] is None else f"{s.values[i]:g}") for s in c.series]
+            rows.append(f"| {cat} | " + " | ".join(vals) + " |")
+        title = f"[차트({c.chart_type}){': ' + c.title if c.title else ''}]{self._tag(c)}"
+        return "\n".join([title, head, sep, *rows])
+
+
+def _endpoints(line: Shape, shapes: list[Shape]):
+    """연결선 양 끝이 닿은 도형. 연결 정보(stCxn/endCxn)가 있으면 그것을, 없으면 좌표로 찾는다."""
+    by_id = {s.id: s for s in shapes if s.id}
+    a = by_id.get(line.connect_from) if line.connect_from else None
+    b = by_id.get(line.connect_to) if line.connect_to else None
+    if a is not None and b is not None:
+        return a, b
+
+    x1, y1, x2, y2 = line.x, line.y, line.x + line.width, line.y + line.height
+    if line.flip_h:
+        x1, x2 = x2, x1
+    if line.flip_v:
+        y1, y2 = y2, y1
+    if line.rotation:
+        import math
+
+        cx, cy = line.x + line.width / 2, line.y + line.height / 2
+        t = math.radians(line.rotation)
+
+        def rot(px, py):
+            dx, dy = px - cx, py - cy
+            return cx + dx * math.cos(t) - dy * math.sin(t), cy + dx * math.sin(t) + dy * math.cos(t)
+
+        (x1, y1), (x2, y2) = rot(x1, y1), rot(x2, y2)
+
+    def hit(px, py):
+        best, best_d = None, 8.0  # 8pt 이내
+        for s in shapes:
+            if s.is_line or s is line:
+                continue
+            dx = max(s.x - px, 0, px - (s.x + s.width))
+            dy = max(s.y - py, 0, py - (s.y + s.height))
+            d = (dx * dx + dy * dy) ** 0.5
+            if d <= best_d:
+                best, best_d = s, d
+        return best
+
+    return a or hit(x1, y1), b or hit(x2, y2)
+
+
+def _flow_order(boxes: list[Shape], edges) -> list[Shape]:
+    """연결선이 있으면 흐름 순서(들어오는 선이 없는 도형부터)로, 없으면 위→아래, 왼쪽→오른쪽으로."""
+    by_pos = sorted(boxes, key=lambda s: (round(s.y / 10), s.x))
+    if not edges:
+        return by_pos
+    nexts: dict[int, list[Shape]] = {}
+    indeg = {id(s): 0 for s in boxes}
+    for a, _, b in edges:
+        nexts.setdefault(id(a), []).append(b)
+        indeg[id(b)] = indeg.get(id(b), 0) + 1
+    order: list[Shape] = []
+    seen: set[int] = set()
+    queue = [s for s in by_pos if indeg[id(s)] == 0]
+    while queue or len(order) < len(by_pos):
+        if not queue:
+            queue = [next(s for s in by_pos if id(s) not in seen)]  # 순환이나 연결 안 된 도형
+        s = queue.pop(0)
+        if id(s) in seen:
+            continue
+        seen.add(id(s))
+        order.append(s)
+        queue.extend(sorted((n for n in nexts.get(id(s), []) if id(n) not in seen), key=lambda n: (n.y, n.x)))
+    return order

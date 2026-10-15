@@ -58,40 +58,55 @@ def match_marker(line: str) -> tuple[str, str, str] | None:
     return None
 
 
-def detect_outline(lines: list[str]) -> list[OutlineItem]:
-    """줄 목록에서 계층을 인식한다.
+class OutlineTracker:
+    """문단을 순서대로 넣으면 개조식 계층을 계산한다.
 
-    표지가 없는 줄은 바로 앞 항목의 이어지는 내용으로 보고 합친다.
+    처음 보는 표지 종류는 한 단계 아래, 이미 나온 종류가 다시 나오면 그 단계로 돌아간 것으로 본다.
     ※(참고) 표지는 계층에 넣지 않고 바로 앞 항목보다 한 단계 아래로 둔다.
     """
-    stack: list[str] = []  # 현재 열려 있는 표지 종류들 (바깥 → 안쪽)
-    items: list[OutlineItem] = []
 
+    def __init__(self):
+        self.stack: list[str] = []  # 현재 열려 있는 표지 종류들 (바깥 → 안쪽)
+        self.last_level: int | None = None
+
+    def reset(self) -> None:
+        self.stack.clear()
+        self.last_level = None
+
+    def feed(self, line: str) -> tuple[int, str, str] | None:
+        """(단계, 종류, 표지) 또는 표지가 없으면 None."""
+        found = match_marker(line.strip())
+        if found is None:
+            return None
+        kind, marker, _ = found
+        if kind == "note":
+            level = (self.last_level + 1) if self.last_level is not None else 0
+            return level, kind, marker
+        if kind in self.stack:
+            del self.stack[self.stack.index(kind) + 1 :]  # 위 단계로 돌아감
+        else:
+            self.stack.append(kind)  # 처음 보는 표지 → 한 단계 아래
+        self.last_level = len(self.stack) - 1
+        return self.last_level, kind, marker
+
+
+def detect_outline(lines: list[str]) -> list[OutlineItem]:
+    """줄 목록에서 계층을 인식한다. 표지가 없는 줄은 바로 앞 항목에 이어 붙인다."""
+    tracker = OutlineTracker()
+    items: list[OutlineItem] = []
     for raw in lines:
         line = raw.strip()
         if not line:
             continue
-        found = match_marker(line)
-
+        found = tracker.feed(line)
         if found is None:
             if items and items[-1].kind is not None:
                 items[-1].text += " " + line  # 앞 항목의 줄바꿈된 내용
             else:
                 items.append(OutlineItem(None, None, "", line))
             continue
-
-        kind, marker, body = found
-        if kind == "note":
-            level = (items[-1].level + 1) if items and items[-1].level is not None else 0
-            items.append(OutlineItem(level, kind, marker, body))
-            continue
-
-        if kind in stack:
-            del stack[stack.index(kind) + 1 :]  # 위 단계로 돌아감
-        else:
-            stack.append(kind)  # 처음 보는 표지 → 한 단계 아래
-        items.append(OutlineItem(len(stack) - 1, kind, marker, body))
-
+        level, kind, marker = found
+        items.append(OutlineItem(level, kind, marker, match_marker(line)[2]))
     return items
 
 

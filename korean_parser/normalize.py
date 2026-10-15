@@ -47,12 +47,21 @@ def is_hangul_syllable(ch: str) -> bool:
     return "가" <= ch <= "힣"
 
 
-def normalize_text(text: str, pua_map: Mapping[str, str] | None = None) -> str:
-    """문자 단위로 텍스트를 정규화한다. 줄바꿈은 유지한다."""
+def normalize_chars(text: str, pua_map: Mapping[str, str] | None = None) -> str:
+    """글자만 바꾸고 공백 개수나 앞뒤 공백은 건드리지 않는다.
+
+    문단이 여러 서식 조각(run)으로 나뉜 경우 조각 사이 공백을 지키기 위해 쓴다.
+    """
     text = unicodedata.normalize("NFC", text)
     text = text.translate(_TABLE)
     if pua_map:
         text = "".join(pua_map.get(ch, ch) for ch in text)
+    return text
+
+
+def normalize_text(text: str, pua_map: Mapping[str, str] | None = None) -> str:
+    """문자 단위로 텍스트를 정규화한다. 줄바꿈은 유지한다."""
+    text = normalize_chars(text, pua_map)
     text = _MULTI_SPACE.sub(" ", text)
     return "\n".join(line.strip() for line in text.split("\n"))
 
