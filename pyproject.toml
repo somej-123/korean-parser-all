@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "korean-parser"
+version = "0.1.0"
+description = "한국어 문서 파싱 후처리: 정규화, 띄어쓰기 복원, 개조식 계층 인식"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = ["kiwipiepy>=0.20"]
+
+[project.optional-dependencies]
+docling = ["docling>=2.50"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["korean_parser*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
