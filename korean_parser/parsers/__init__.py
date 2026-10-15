@@ -28,9 +28,19 @@ def _hwpx(path: Path) -> Document:
     return parse_hwpx(path)
 
 
+def _pdf(path: Path) -> Document:
+    from .pdf import PdfEngineMissing, parse_pdf
+
+    try:
+        return parse_pdf(path)
+    except PdfEngineMissing as exc:
+        raise DocumentError(str(exc)) from exc
+
+
 _PARSERS = {
     "docx": _docx,
     "hwpx": _hwpx,
+    "pdf": _pdf,
 }
 
 

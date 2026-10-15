@@ -307,6 +307,8 @@ class Figure(_Block):
     height_pt: float | None = None
     alt: str | None = None
     caption: str | None = None
+    inner_text: str | None = None  # 그림·도식 안에 있는 글자 (PDF 텍스트 레이어나 OCR에서). LLM용
+    style: ParagraphStyle | None = None  # 정렬·들여쓰기
 
 
 class PageBreak(_Block):
@@ -357,6 +359,34 @@ class Meta(_Model):
     language: str | None = None
 
 
+class TextRun(_Model):
+    """고정 레이아웃용 글 조각: 원본 위치(기준선)와 너비 그대로 그린다."""
+
+    text: str
+    x: float
+    baseline: float
+    width: float
+    size_pt: float
+    color: str | None = None
+    bold: bool = False
+    italic: bool = False
+    font: str | None = None
+    block_id: str | None = None  # 이 글이 속한 블록 (LLM 답변 ↔ 화면 위치 연결)
+
+
+class FixedPage(_Model):
+    """원본과 같은 모양으로 보여 주기 위한 쪽: 글자를 뺀 바탕 그림 + 원래 위치의 글 조각.
+
+    PDF처럼 쪽 배치가 정해진 문서에서 쓴다. 의미 구조(blocks)와 별개로 화면 재현용이다.
+    """
+
+    page: int
+    width_pt: float
+    height_pt: float
+    background_image_id: str | None = None
+    runs: list[TextRun] = Field(default_factory=list)
+
+
 class Document(_Model):
     meta: Meta = Field(default_factory=Meta)
     page: PageSetup = Field(default_factory=PageSetup)
@@ -366,6 +396,7 @@ class Document(_Model):
     footer: list[Block] = Field(default_factory=list)
     notes: dict[str, Note] = Field(default_factory=dict)
     images: dict[str, Image] = Field(default_factory=dict)
+    fixed_pages: list[FixedPage] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
     def iter_blocks(self):

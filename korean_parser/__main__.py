@@ -24,6 +24,8 @@ def main(argv=None) -> int:
     c.add_argument("-o", "--out", default="out", help="결과 폴더")
     c.add_argument("--formats", default="html,llm,json", help="html, llm, json 중 쉼표로 구분")
     c.add_argument("--no-korean", action="store_true", help="한국어 처리 레이어 끄기")
+    c.add_argument("--layout", choices=["auto", "flow", "fixed"], default="auto",
+                   help="HTML 배치: auto(기본), flow(문서 흐름형), fixed(원본 쪽 모양, PDF만)")
     args = p.parse_args(argv)
 
     formats = {f.strip() for f in args.formats.split(",") if f.strip()}
@@ -40,7 +42,7 @@ def main(argv=None) -> int:
             continue
         stem = out / src.stem
         if "html" in formats:
-            stem.with_suffix(".html").write_text(render_html(doc), encoding="utf-8")
+            stem.with_suffix(".html").write_text(render_html(doc, layout=args.layout), encoding="utf-8")
         if "llm" in formats:
             stem.with_suffix(".llm.md").write_text(render_llm(doc), encoding="utf-8")
         if "json" in formats:

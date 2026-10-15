@@ -6,3 +6,5 @@ bench_results/
 .pytest_cache/
 *.egg-info/
 build/
+samples_web/
+samples_g2b/

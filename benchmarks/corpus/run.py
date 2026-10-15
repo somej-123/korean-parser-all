@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""여러 문서(DOCX, HWPX)를 한꺼번에 파싱·렌더링해서 실패, 경고, 처리 시간, 추출 요소 수를 집계한다.
+"""여러 문서(DOCX, HWPX, PDF)를 한꺼번에 파싱·렌더링해서 실패, 경고, 처리 시간, 추출 요소 수를 집계한다.
+
+PDF는 레이아웃 모델을 돌리므로 느리다 (CPU에서 문서당 수십 초). --pdf로 켤 때만 포함한다.
 
     ./fetch_samples.sh samples_web
     python run.py samples_web --out corpus_report.md
@@ -43,12 +45,13 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("folder")
     p.add_argument("--out", default="corpus_report.md")
+    p.add_argument("--pdf", action="store_true", help="PDF도 포함 (느림)")
     args = p.parse_args()
 
     root = Path(args.folder)
     files = sorted(
         f for f in root.rglob("*")
-        if f.suffix.lower() in (".docx", ".hwpx")
+        if f.suffix.lower() in ((".docx", ".hwpx", ".pdf") if args.pdf else (".docx", ".hwpx"))
         and not any(part.startswith(".") for part in f.relative_to(root).parts)  # 내려받기용 원본 저장소 제외
     )
     ok, failed, times = [], [], []
@@ -73,7 +76,8 @@ def main() -> int:
         "# 문서 코퍼스 실행 결과",
         "",
         f"- 문서 {len(files)}개 (DOCX {sum(f.suffix.lower() == '.docx' for f in files)}, "
-        f"HWPX {sum(f.suffix.lower() == '.hwpx' for f in files)}) 중 성공 {len(ok)}개, 실패 {len(failed)}개",
+        f"HWPX {sum(f.suffix.lower() == '.hwpx' for f in files)}, PDF {sum(f.suffix.lower() == '.pdf' for f in files)}) "
+        f"중 성공 {len(ok)}개, 실패 {len(failed)}개",
         f"- 문서당 처리 시간(파싱+HTML+LLM): 중앙값 {statistics.median(times) * 1000:.0f}ms, "
         f"최대 {max(times) * 1000:.0f}ms" if times else "",
         "",

@@ -59,6 +59,7 @@ body { margin: 0; padding: 24px 12px; background: #e9e9ec; color: #000; }
 .kp-notes { border-top: 1px solid #999; margin-top: 18pt; padding-top: 6pt; font-size: 0.9em; }
 .kp-note { display: flex; gap: 4pt; }
 .kp-chart { margin: 4pt 0; }
+.kp-figure { margin: 4pt 0; }
 .kp-chart figcaption { font-weight: bold; margin-bottom: 4pt; }
 .kp-chart summary { font-size: 9pt; color: #555; cursor: pointer; margin-top: 2pt; }
 .kp-chart table { border-collapse: collapse; }
@@ -69,6 +70,11 @@ body { margin: 0; padding: 24px 12px; background: #e9e9ec; color: #000; }
 .kp-src-hwpx .kp-shape-text p { margin-block: calc((1 - var(--kp-lh, 1.17)) * 0.5em); }
 .kp-anchor-host { position: relative; height: 0; }
 .kp-anchor-host > * { position: absolute; margin: 0; }
+.kp-fixed-page { margin: 0 auto 24px; max-width: 100%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,.15), 0 4px 16px rgba(0,0,0,.08); }
+.kp-fixed-svg { display: block; width: 100%; height: auto; }
+.kp-fixed-svg text { white-space: pre; }
+g.kp-highlight text { fill: #b45309; }
 [data-kp-id].kp-highlight { outline: 2px solid #f5a623; outline-offset: 2px; background: #fff7e0; }
 """
 
@@ -198,14 +204,20 @@ def _attr(name: str, css: str) -> str:
 
 
 class HtmlRenderer:
-    def __init__(self, doc: Document, standalone: bool = True):
+    def __init__(self, doc: Document, standalone: bool = True, layout: str = "auto"):
         self.doc = doc
         self.standalone = standalone
+        # auto: 고정 쪽(PDF)이 있으면 원본 모양 그대로(fixed), 없으면 흐름형(flow)
+        self.layout = ("fixed" if doc.fixed_pages else "flow") if layout == "auto" else layout
+        if self.layout == "fixed" and not doc.fixed_pages:
+            self.layout = "flow"
 
     # ------------------------------------------------------------------
 
     def render(self) -> str:
         doc = self.doc
+        if self.layout == "fixed":
+            return self._wrap(self._fixed_pages())
         p = doc.page
         base = doc.default_text_style
         font = font_stack(base.font)
@@ -234,7 +246,10 @@ class HtmlRenderer:
         if doc.footer:
             parts.append(f'<footer class="kp-footer">{self.blocks(doc.footer)}</footer>')
         parts.append("</article>")
-        body = "".join(parts)
+        return self._wrap("".join(parts))
+
+    def _wrap(self, body: str) -> str:
+        doc = self.doc
         if not self.standalone:
             return f"<style>{BASE_CSS}</style>{body}"
 
@@ -246,6 +261,45 @@ class HtmlRenderer:
             f'<meta name="generator" content="korean-parser"><title>{title}</title>'
             f"<style>{BASE_CSS}</style></head><body>{body}</body></html>"
         )
+
+    # ------------------------------------------------------------------
+    # 고정 레이아웃 (PDF): 글자를 뺀 바탕 그림 위에 원래 위치·크기로 글을 올린다
+    # ------------------------------------------------------------------
+
+    def _fixed_pages(self) -> str:
+        pages = []
+        for fp in self.doc.fixed_pages:
+            w, h = fp.width_pt, fp.height_pt
+            parts = [f'<svg class="kp-fixed-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:.2f} {h:.2f}" '
+                     f'width="{w:.2f}pt" height="{h:.2f}pt" role="document" aria-label="{fp.page}쪽">']
+            src = self._image_src(fp.background_image_id) if fp.background_image_id else None
+            if src:
+                parts.append(f'<image href="{src}" x="0" y="0" width="{w:.2f}" height="{h:.2f}" preserveAspectRatio="none"/>')
+            open_group, current = False, None
+            for r in fp.runs:
+                # 같은 블록의 글 조각은 하나의 <g data-kp-id>로 묶는다 (화면 강조용)
+                if not open_group or r.block_id != current:
+                    if open_group:
+                        parts.append("</g>")
+                    attr = f' data-kp-id="{escape(r.block_id)}"' if r.block_id else ""
+                    parts.append(f"<g{attr}>")
+                    open_group, current = True, r.block_id
+                attrs = [f'x="{r.x:.2f}"', f'y="{r.baseline:.2f}"', f'font-size="{r.size_pt:.2f}"',
+                         f'textLength="{r.width:.2f}"', 'lengthAdjust="spacingAndGlyphs"',
+                         f'fill="{_color(r.color) or "#000"}"']
+                style = [f"font-family:{font_stack(r.font)}"]
+                weight = "bold" if r.bold else font_weight(r.font)
+                if weight:
+                    style.append(f"font-weight:{weight}")
+                if r.italic:
+                    style.append("font-style:italic")
+                parts.append(f'<text {" ".join(attrs)} style="{escape(";".join(style))}" xml:space="preserve">'
+                             f"{escape(r.text)}</text>")
+            if open_group:
+                parts.append("</g>")
+            parts.append("</svg>")
+            pages.append(f'<article class="kp-fixed-page" data-page="{fp.page}" style="width:{w:.2f}pt">{"".join(parts)}</article>')
+        return "".join(pages)
 
     # ------------------------------------------------------------------
     # 블록
@@ -268,9 +322,9 @@ class HtmlRenderer:
         if isinstance(b, Chart):
             return self._chart(b)
         if isinstance(b, Figure):
-            img = self._image(b.image_id, b.width_pt, b.height_pt, b.alt)
+            img = self._image(b.image_id, b.width_pt, b.height_pt, b.alt or b.inner_text)
             cap = f"<figcaption>{escape(b.caption)}</figcaption>" if b.caption else ""
-            return f"<figure{self._id(b)}>{img}{cap}</figure>"
+            return f'<figure class="kp-figure"{self._id(b)}{_attr("style", paragraph_css(b.style))}>{img}{cap}</figure>'
         if isinstance(b, PageBreak):
             return f'<hr class="kp-page-break"{self._id(b)} aria-label="페이지 나눔">'
         return ""
@@ -453,5 +507,6 @@ class HtmlRenderer:
         return f'<section class="kp-notes" aria-label="각주">{"".join(items)}</section>'
 
 
-def render_html(doc: Document, standalone: bool = True) -> str:
-    return HtmlRenderer(doc, standalone=standalone).render()
+def render_html(doc: Document, standalone: bool = True, layout: str = "auto") -> str:
+    """layout: auto(기본), flow(문서 흐름형), fixed(원본 쪽 모양 그대로, PDF만)."""
+    return HtmlRenderer(doc, standalone=standalone, layout=layout).render()

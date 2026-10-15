@@ -15,7 +15,7 @@
 |---|---|---|
 | DOCX | ✅ v0.2 | XML 규칙 파싱 (AI 없음) |
 | HWPX | ✅ v0.3 | XML 규칙 파싱 (AI 없음) |
-| PDF | 후처리만 지원 | Docling + 한국어 후처리 (`docling_adapter`) |
+| PDF | ✅ v0.4 | Docling(레이아웃·표·OCR) + PDF 텍스트 레이어로 서식 복원 + 한국어 후처리 |
 | HWP(5.0), PPTX, XLSX | 예정 | |
 
 **DOCX**: 제목 계층, 글자 서식(굵게·색·크기·밑줄·대문자), 문단 서식(정렬·들여쓰기·간격·테두리),
@@ -30,12 +30,28 @@
 
 ![HWPX: 한컴오피스 미리보기(왼쪽)와 HTML 결과(오른쪽)](docs/images/hwpx_project_plan_compare.png)
 
+**PDF**: Docling으로 제목·문단·목록·표(병합)·그림 영역과 읽기 순서를 찾고, PDF 텍스트 레이어에서
+글자 크기·굵기·색을 읽어 서식과 제목 단계를 되살립니다. Docling이 그림 하나로 잘못 묶은 영역은
+실제 그래픽 개체 위치로 나눠 캡션·제목을 본문으로 되돌리고, 도식 안 글자는 LLM용으로 따로 뽑습니다.
+여러 쪽에 반복되는 글만 머리말·꼬리말로 인정하고, 모든 블록에 쪽 번호와 좌표가 붙습니다.
+텍스트 레이어가 없는 스캔 PDF는 OCR(RapidOCR 한국어)로 읽습니다.
+
+PDF의 HTML은 두 가지 배치로 만들 수 있습니다.
+
+| 배치 | 방식 | 용도 |
+|---|---|---|
+| `fixed` (PDF 기본) | 글자를 지운 원본 쪽을 바탕 그림으로 깔고, 실제 글을 원래 위치·크기·색으로 올림 (가려진 글·겹쳐 그린 글은 제외) | 원본과 똑같은 화면. 글은 검색·복사되고 블록 id로 LLM 답변과 연결 |
+| `flow` | 문서 구조대로 다시 흐르게 배치 | 모바일, 접근성, 편집 |
+
+![PDF 고정 배치: 원본(왼쪽)과 HTML(오른쪽)](docs/images/pdf_fixed_compare.png)
+
 ## 사용법
 
 ```bash
 pip install -e ".[dev]"
 python -m korean_parser convert 문서.docx -o out/      # out/문서.html, 문서.llm.md, 문서.json
 python -m korean_parser convert 보고서.hwpx -o out/
+python -m korean_parser convert 공고문.pdf -o out/ --layout fixed   # PDF는 pip install -e ".[pdf]" 필요
 ```
 
 ```python
@@ -75,13 +91,13 @@ LLM 출력 예 ([`tests/fixtures/korean_report.docx`](tests/fixtures/)):
 | 경로 | 내용 |
 |---|---|
 | [`korean_parser/ir.py`](korean_parser/ir.py) | 통합 문서 모델 |
-| [`korean_parser/parsers/`](korean_parser/parsers/) | 단일 입구 `parse()`와 형식별 파서 (DOCX, HWPX) |
+| [`korean_parser/parsers/`](korean_parser/parsers/) | 단일 입구 `parse()`와 형식별 파서 (DOCX, HWPX, PDF) |
 | [`korean_parser/render/`](korean_parser/render/) | HTML, LLM 텍스트, SVG(도형·차트) 렌더러 |
 | [`korean_parser/enrich.py`](korean_parser/enrich.py) | 한국어 처리 레이어를 문서 모델에 적용 |
 | `korean_parser/normalize.py`, `spacing.py`, `outline.py` | 문자 정규화, 띄어쓰기 복원, 개조식 계층 인식 |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 설계와 단계별 계획 |
 | [`benchmarks/visual-compare/`](benchmarks/visual-compare/) | 원본 vs HTML 시각 비교 |
-| [`benchmarks/corpus/`](benchmarks/corpus/) | 웹 문서 180개(DOCX 131, HWPX 49) 일괄 실행. 정상 문서 164개 전부 성공 |
+| [`benchmarks/corpus/`](benchmarks/corpus/) | 웹 문서 180개(DOCX 131, HWPX 49) 일괄 실행. 정상 문서 164개 전부 성공. 나라장터 첨부파일 수집 스크립트 |
 | [`benchmarks/korean-postprocess/`](benchmarks/korean-postprocess/) | PDF 띄어쓰기 복원 평가 (F1 0.459 → 0.991) |
 | [`benchmarks/docling-cpu/`](benchmarks/docling-cpu/) | Docling CPU 속도 벤치마크 |
 
@@ -126,6 +142,13 @@ HWPX를 LLM 텍스트로 바꿀 때는 한글 문서의 관행을 반영합니�
 - 다단(단 나누기), 탭 위치 정렬, 글꼴이 없는 환경에서의 글자 폭 차이는 원본과 다를 수 있습니다.
 - Office 2016 신형 차트(chartex)는 아직 읽지 않습니다.
 - SmartArt는 Word가 저장해 둔 그리기 결과를 도형으로 읽도록 구현했지만, 테스트 문서가 없어 아직 검증하지 못했습니다.
+
+PDF
+- 레이아웃 모델을 쓰므로 CPU에서 문서당 수십 초가 걸립니다 (모델 첫 로딩 포함). 서버로 운영하면 로딩은 한 번만 듭니다.
+- 흐름형(flow) 배치는 다단·포스터처럼 복잡한 쪽을 원본처럼 재현하지 못합니다. 이 경우 fixed를 쓰세요.
+- PDF 안의 하이퍼링크, 각주 연결, 수식(LaTeX 변환)은 아직 읽지 않습니다.
+- 스캔 PDF는 OCR 품질에 좌우되고, 서식(크기·굵기·색)과 fixed 배치는 만들지 않습니다.
+- 표 테두리는 '선이 있으면 모든 칸에 실선'으로 단순화합니다 (fixed 배치에서는 원본 선이 그대로 보입니다).
 
 HWPX
 - 다단(단 나누기), 바탕쪽(master page), 글상자 연결, 세로쓰기는 아직 반영하지 않습니다.

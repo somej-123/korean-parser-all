@@ -1,0 +1,86 @@
+"""PDF 파서 테스트. tests/fixtures/korean_report.pdf는 korean_report.docx를 LibreOffice로 변환한 것이다.
+
+Docling(레이아웃 모델)이 필요하므로 설치되지 않은 환경에서는 건너뛴다.
+"""
+
+from pathlib import Path
+
+import pytest
+
+pytest.importorskip("docling")
+pytest.importorskip("pypdfium2")
+
+from korean_parser.ir import Figure, Heading, Paragraph, Table  # noqa: E402
+from korean_parser.parsers import parse  # noqa: E402
+from korean_parser.render.html import render_html  # noqa: E402
+from korean_parser.render.llm import render_llm  # noqa: E402
+
+PDF = Path(__file__).parent / "fixtures" / "korean_report.pdf"
+
+
+@pytest.fixture(scope="module")
+def doc():
+    return parse(PDF)
+
+
+def of(doc, kind):
+    return [b for b in doc.iter_blocks() if isinstance(b, kind)]
+
+
+def test_metadata_and_provenance(doc):
+    assert doc.meta.source_format == "pdf" and doc.meta.title == "2026년 문서 파싱 고도화 계획"
+    paras = of(doc, Paragraph)
+    assert all(p.prov and p.prov.page and p.prov.bbox for p in paras)  # 쪽과 좌표
+
+
+def test_heading_levels_from_font_size(doc):
+    levels = {h.text: h.level for h in of(doc, Heading)}
+    title = next(t for t in levels if t.startswith("2026"))
+    assert levels[title] < levels["3. 예산 계획"]  # 큰 글자의 제목이 더 높은 단계
+
+
+def test_korean_outline_from_list_markers(doc):
+    outline = [(p.outline.level, p.outline.marker) for p in of(doc, Paragraph) if p.outline]
+    assert (0, "□") in outline and (1, "○") in outline and (2, "-") in outline
+    assert (1, "가.") in outline and (2, "1)") in outline and (3, "가)") in outline
+
+
+def test_merged_table_and_cell_background(doc):
+    table = of(doc, Table)[0]
+    first = table.rows[0].cells
+    assert (first[0].row_span, first[1].col_span) == (2, 3)
+    assert first[0].background and first[0].background.upper() == "#D9E2F3"
+
+
+def test_picture_region_is_split(doc):
+    """Docling이 차트·캡션·제목·순서도를 한 그림으로 묶은 것을 그래픽 단위로 나눈다."""
+    figures = of(doc, Figure)
+    assert len(figures) >= 2
+    assert any(f.caption and f.caption.startswith("그림 1") for f in figures)
+    flow = next(f for f in figures if f.inner_text)
+    for word in ("신청", "승인", "반려"):
+        assert word in flow.inner_text
+    assert any(h.text.startswith("5.") for h in of(doc, Heading))  # 그림 안에 묶였던 제목을 되살림
+
+
+def test_misclassified_header_returns_to_body(doc):
+    assert any("단위" in p.text for p in of(doc, Paragraph))
+    assert doc.header and "대외비" in doc.header[0].text
+
+
+def test_fixed_layout(doc):
+    assert len(doc.fixed_pages) == 2
+    page = doc.fixed_pages[0]
+    assert page.background_image_id in doc.images
+    ids = {b.id for b in doc.iter_blocks()}
+    linked = [r for r in page.runs if r.block_id]
+    assert linked and all(r.block_id in ids for r in linked)
+    html = render_html(doc)
+    assert 'class="kp-fixed-page"' in html and 'lengthAdjust="spacingAndGlyphs"' in html
+    assert 'class="kp-page' in render_html(doc, layout="flow")
+
+
+def test_llm_text(doc):
+    text = render_llm(doc)
+    assert '<td rowspan="2">구분</td><td colspan="3">2026년</td>' in text
+    assert "[그림: 그림 1." in text and "그림 안 글자:" in text

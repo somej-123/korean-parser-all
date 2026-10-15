@@ -35,11 +35,14 @@ def render_original(src: Path, pages: int, work: Path) -> Image.Image:
         return hwpx_preview(src)
     import pypdfium2 as pdfium
 
-    subprocess.run(
-        ["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(work), str(src)],
-        check=True, capture_output=True, timeout=180,
-    )
-    pdf = pdfium.PdfDocument(str(work / (src.stem + ".pdf")))
+    if src.suffix.lower() == ".pdf":
+        pdf = pdfium.PdfDocument(str(src))  # PDF는 그대로 그린다
+    else:
+        subprocess.run(
+            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", str(work), str(src)],
+            check=True, capture_output=True, timeout=180,
+        )
+        pdf = pdfium.PdfDocument(str(work / (src.stem + ".pdf")))
     imgs = [pdf[i].render(scale=SCALE).to_pil() for i in range(min(pages, len(pdf)))]
     return _stack(imgs)
 
@@ -60,7 +63,7 @@ def render_ours(src: Path, work: Path, max_height: int) -> Image.Image:
 
     doc = parse(src)
     html_path = work / (src.stem + ".html")
-    html_path.write_text(render_html(doc), encoding="utf-8")
+    html_path.write_text(render_html(doc, layout=os.environ.get("KP_LAYOUT", "auto")), encoding="utf-8")
     width = int(doc.page.width_pt * SCALE) + 40
     launch = {}
     if os.path.exists("/opt/pw-browsers/chromium"):
@@ -105,7 +108,8 @@ def side_by_side(left: Image.Image, right: Image.Image, title: str) -> Image.Ima
     out = Image.new("RGB", (w, h), (233, 233, 236))
     d = ImageDraw.Draw(out)
     f = _font(18)
-    source = "한컴오피스 미리보기" if title.lower().endswith(".hwpx") else "LibreOffice"
+    source = ("한컴오피스 미리보기" if title.lower().endswith(".hwpx")
+              else "PDF" if title.lower().endswith(".pdf") else "LibreOffice")
     d.text((pad, 12), f"원본 ({source}) — {title}", fill=(30, 30, 30), font=f)
     d.text((left.width + pad * 2, 12), "korean-parser HTML (Chromium)", fill=(30, 30, 30), font=f)
     out.paste(left, (pad, head))

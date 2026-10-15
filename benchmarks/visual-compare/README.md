@@ -4,6 +4,7 @@
 나란히 붙인다. "후처리 없이 원본처럼 보이는가"를 눈으로 확인하는 도구다.
 
 - DOCX: LibreOffice로 PDF 변환 후 페이지 이미지
+- PDF: 그대로 페이지 이미지 (`KP_LAYOUT=flow`로 흐름형 배치 비교)
 - HWPX: 파일 안의 미리보기(`Preview/PrvImage.png`). 한컴오피스가 직접 그린 첫 페이지라 가장 정확한 기준이다
 
 ```bash
@@ -14,6 +15,16 @@ python compare.py 문서폴더/*.docx -o out/ --pages 2
 
 필요: LibreOffice(`soffice`), Chromium(Playwright). LibreOffice 렌더링도 Word와 완전히 같지는 않으므로
 "대략적인 기준"으로 본다.
+
+## 예시 (PDF)
+
+고정 배치(fixed, 기본): 글자를 지운 원본 쪽 위에 실제 글을 원래 위치로 올린다.
+
+![](../../docs/images/pdf_fixed_compare.png)
+
+흐름형 배치(flow): 문서 구조대로 다시 배치한다. 글자 크기·색·표 배경은 PDF에서 복원한다.
+
+![](../../docs/images/pdf_flow_compare.png)
 
 ## 예시 (HWPX)
 

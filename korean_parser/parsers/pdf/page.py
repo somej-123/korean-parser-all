@@ -1,0 +1,399 @@
+"""PDF 페이지 분석 (pdfium): 글자 서식, 그래픽 개체 위치, 색 샘플링, 영역 잘라내기.
+
+Docling은 레이아웃(무엇이 제목·표·그림인지)은 잘 찾지만 글자 크기·굵기·색은 주지 않는다.
+PDF 텍스트 레이어에는 이 정보가 글자마다 있으므로, Docling이 찾은 영역 안의 글자를 읽어 서식을 되살린다.
+
+좌표는 모두 '왼쪽 위 원점, pt' 로 통일한다. (PDF 자체는 왼쪽 아래 원점)
+"""
+
+from __future__ import annotations
+
+import ctypes
+import io
+import statistics
+from collections import Counter
+from dataclasses import dataclass, field
+
+BBox = tuple[float, float, float, float]  # x0, y0(위), x1, y1(아래)
+
+_BOLD_NAME = ("bold", "black", "heavy", "semibold", "demibold", "extrabold", "gothic-b", "-b", "견고딕", "헤드라인")
+
+
+@dataclass
+class Char:
+    text: str
+    box: BBox
+    size: float
+    bold: bool
+    italic: bool
+    color: str
+    font: str
+    origin: tuple[float, float] = (0.0, 0.0)  # 글자 기준점 (x, 기준선 y)
+
+
+@dataclass
+class Run:
+    """같은 줄, 같은 서식으로 이어진 글자 묶음. 고정 레이아웃에서 원래 위치에 그대로 그린다."""
+
+    text: str
+    x: float
+    baseline: float
+    width: float
+    size: float
+    bold: bool
+    italic: bool
+    color: str
+    font: str
+    box: BBox
+
+
+@dataclass
+class Graphic:
+    kind: str  # image, path, shading
+    box: BBox
+    fill: str | None = None  # 채운 도형의 색 (표 칸 배경 등)
+
+
+@dataclass
+class TextStyleGuess:
+    size: float | None = None
+    bold: bool = False
+    italic: bool = False
+    color: str | None = None
+    font: str | None = None
+
+
+@dataclass
+class PageInfo:
+    number: int  # 1부터
+    width: float
+    height: float
+    chars: list[Char] = field(default_factory=list)
+    graphics: list[Graphic] = field(default_factory=list)
+    _bitmap: object = None  # 색 샘플링용 저해상도 렌더링 (PIL)
+    _page: object = None
+
+    # ------------------------------------------------------------------
+
+    def chars_in(self, box: BBox, pad: float = 1.0) -> list[Char]:
+        x0, y0, x1, y1 = box[0] - pad, box[1] - pad, box[2] + pad, box[3] + pad
+        out = []
+        for c in self.chars:
+            cx, cy = (c.box[0] + c.box[2]) / 2, (c.box[1] + c.box[3]) / 2
+            if x0 <= cx <= x1 and y0 <= cy <= y1:
+                out.append(c)
+        return out
+
+    def style_in(self, box: BBox) -> TextStyleGuess:
+        """영역 안 글자들의 대표 서식 (공백 제외, 가장 흔한 값)."""
+        chars = [c for c in self.chars_in(box) if c.text.strip()]
+        if not chars:
+            return TextStyleGuess()
+        size = statistics.median(c.size for c in chars)
+        bold = sum(c.bold for c in chars) > len(chars) / 2
+        italic = sum(c.italic for c in chars) > len(chars) / 2
+        color = Counter(c.color for c in chars).most_common(1)[0][0]
+        font = Counter(c.font for c in chars).most_common(1)[0][0]
+        return TextStyleGuess(size=round(size * 2) / 2, bold=bold, italic=italic, color=color, font=font or None)
+
+    def fill_at(self, x: float, y: float) -> str | None:
+        """그 점을 덮는 가장 작은 '채운 도형'의 색 (흰색 제외). 표 칸 배경을 찾는 데 쓴다."""
+        best, best_area = None, None
+        for gr in self.graphics:
+            if gr.fill is None:
+                continue
+            x0, y0, x1, y1 = gr.box
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                a = (x1 - x0) * (y1 - y0)
+                if best_area is None or a < best_area:
+                    best, best_area = gr.fill, a
+        if best is None or best in ("#FFFFFF",):
+            return None
+        return best
+
+    def runs(self) -> list[Run]:
+        """글자를 같은 줄·같은 서식·가까운 간격 단위로 묶는다 (내용 순서 기준)."""
+        runs: list[Run] = []
+        cur: list[Char] = []
+
+        def flush():
+            if not cur:
+                return
+            text = "".join(c.text for c in cur)
+            if text.strip():
+                first, last = cur[0], cur[-1]
+                x0 = min(c.box[0] for c in cur)
+                x1 = max(c.box[2] for c in cur)
+                box = (x0, min(c.box[1] for c in cur), x1, max(c.box[3] for c in cur))
+                runs.append(Run(text=text.rstrip(), x=x0, baseline=first.origin[1], width=max(x1 - x0, 0.5),
+                                size=first.size, bold=first.bold, italic=first.italic, color=first.color,
+                                font=first.font, box=box))
+            cur.clear()
+
+        for c in _dedupe_overlaps(self.chars):
+            if cur:
+                p = cur[-1]
+                same_line = abs(c.origin[1] - p.origin[1]) < max(p.size * 0.25, 0.8)
+                same_style = (abs(c.size - p.size) < 0.6 and c.bold == p.bold and c.color == p.color)
+                gap = c.box[0] - p.box[2]
+                # 공백 문자 없이 위치로만 띄운 단어 사이(간격이 글자 크기의 1/4 이상)에서도 끊어 제자리에 놓는다
+                spaced = gap > p.size * 0.25 and not (c.text.isspace() or p.text.isspace())
+                if not (same_line and same_style and -p.size * 0.5 < gap < p.size * 1.2) or spaced:
+                    flush()
+            if c.text.isspace() and not cur:
+                continue
+            cur.append(c)
+        flush()
+        return runs
+
+    def sample_color(self, x: float, y: float) -> str | None:
+        """그 위치의 화면 색 (표 칸 배경 등). 흰색에 가까우면 None."""
+        if self._bitmap is None:
+            return None
+        img = self._bitmap
+        px, py = int(x * img.width / self.width), int(y * img.height / self.height)
+        if not (0 <= px < img.width and 0 <= py < img.height):
+            return None
+        r, g, b = img.getpixel((px, py))[:3]
+        if min(r, g, b) > 245:
+            return None
+        return f"#{r:02X}{g:02X}{b:02X}"
+
+    def crop_png(self, box: BBox, scale: float = 2.0) -> bytes | None:
+        """영역을 PNG로 잘라 낸다 (그림·도식)."""
+        if self._page is None:
+            return None
+        x0, y0, x1, y1 = box
+        crop = (max(x0, 0), max(self.height - y1, 0), max(self.width - x1, 0), max(y0, 0))  # 좌, 하, 우, 상
+        try:
+            bitmap = self._page.render(scale=scale, crop=crop)
+            img = bitmap.to_pil()
+        except Exception:  # noqa: BLE001 - 잘라내기 실패는 그림 누락으로만 처리
+            return None
+        buf = io.BytesIO()
+        img.save(buf, "PNG", optimize=True)
+        return buf.getvalue()
+
+
+class PdfPages:
+    """PDF 전체 페이지의 PageInfo를 필요할 때 만든다."""
+
+    def __init__(self, path):
+        import pypdfium2 as pdfium
+
+        self._path = str(path)
+        self.pdf = pdfium.PdfDocument(self._path)
+        self._bg_pdf = None
+        self._cache: dict[int, PageInfo] = {}
+
+    def __len__(self):
+        return len(self.pdf)
+
+    def close(self):
+        self._cache.clear()
+        if self._bg_pdf is not None:
+            self._bg_pdf.close()
+        self.pdf.close()
+
+    def background_png(self, number: int, scale: float = 1.5) -> bytes | None:
+        """글자를 지운 페이지 그림 (선·상자·색·이미지만). 고정 레이아웃의 바탕으로 쓴다.
+
+        원본을 건드리지 않도록 PDF를 한 번 더 열어 그 사본에서 글자 개체를 지운다.
+        양식(Form XObject) 안에 든 글자는 지울 수 없어 남는다.
+        """
+        import pypdfium2 as pdfium
+        import pypdfium2.raw as raw
+
+        if self._bg_pdf is None:
+            self._bg_pdf = pdfium.PdfDocument(self._path)
+        page = self._bg_pdf[number - 1]
+        try:
+            for obj in list(page.get_objects(max_depth=1)):
+                if obj.type == raw.FPDF_PAGEOBJ_TEXT:
+                    page.remove_obj(obj)
+            page.gen_content()
+            img = page.render(scale=scale).to_pil().convert("RGB")
+        except Exception:  # noqa: BLE001
+            return None
+        buf = io.BytesIO()
+        img.save(buf, "PNG", compress_level=6)
+        return buf.getvalue()
+
+    def has_text_layer(self, sample: int = 5, min_chars: int = 30) -> bool:
+        n = min(len(self.pdf), sample)
+        if n == 0:
+            return False
+        total = 0
+        for i in range(n):
+            tp = self.pdf[i].get_textpage()
+            total += len(tp.get_text_range().strip())
+            tp.close()
+        return total / n >= min_chars
+
+    def page(self, number: int) -> PageInfo:
+        if number not in self._cache:
+            self._cache[number] = self._load(number)
+        return self._cache[number]
+
+    def _load(self, number: int) -> PageInfo:
+        import pypdfium2.raw as raw
+
+        page = self.pdf[number - 1]
+        w, h = page.get_size()
+        info = PageInfo(number=number, width=w, height=h, _page=page)
+
+        # 그리는 순서(z-순서): 글자 위에 나중에 그려진 불투명 도형이 덮으면 원본에서는 안 보이는 글이다
+        order: dict[int, int] = {}
+        occluders: list[tuple[int, BBox]] = []
+        r, g, b, a = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
+        for idx, obj in enumerate(page.get_objects(max_depth=1)):
+            addr = ctypes.cast(obj.raw, ctypes.c_void_p).value
+            if obj.type == raw.FPDF_PAGEOBJ_TEXT:
+                order[addr] = idx
+                continue
+            opaque = obj.type == raw.FPDF_PAGEOBJ_IMAGE
+            if obj.type == raw.FPDF_PAGEOBJ_PATH:
+                mode, stroke = ctypes.c_int(), ctypes.c_int()
+                if raw.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value:
+                    opaque = bool(raw.FPDFPageObj_GetFillColor(obj.raw, r, g, b, a)) and a.value >= 200
+            if opaque:
+                left, bottom, right, top = obj.get_bounds()
+                occluders.append((idx, (left, h - top, right, h - bottom)))
+
+        # 글자
+        tp = page.get_textpage()
+        buf = ctypes.create_string_buffer(256)
+        flags = ctypes.c_int()
+        font_cache: dict[int, tuple[str, bool, bool]] = {}
+        for i in range(tp.count_chars()):
+            ch = tp.get_text_range(i, 1)
+            if not ch or ch in "\r\n":
+                continue
+            left, bottom, right, top = tp.get_charbox(i)
+            # 실제 보이는 크기 = 글꼴 크기 × 글자 행렬의 배율 (행렬로 축소해 그리는 PDF가 많다)
+            m = raw.FS_MATRIX()
+            scale = 1.0
+            if raw.FPDFText_GetMatrix(tp.raw, i, ctypes.byref(m)):
+                scale = abs(m.a * m.d - m.b * m.c) ** 0.5 or 1.0
+            size = raw.FPDFText_GetFontSize(tp.raw, i) * scale
+            ox, oy = ctypes.c_double(), ctypes.c_double()
+            raw.FPDFText_GetCharOrigin(tp.raw, i, ox, oy)
+            weight = raw.FPDFText_GetFontWeight(tp.raw, i)
+            n = raw.FPDFText_GetFontInfo(tp.raw, i, buf, 256, ctypes.byref(flags))
+            name = buf.value[:n].decode("utf-8", "ignore") if n else ""
+            key = hash(name) ^ flags.value
+            if key not in font_cache:
+                lname = name.lower()
+                bold = any(k in lname for k in _BOLD_NAME)
+                italic = "italic" in lname or "oblique" in lname or bool(flags.value & 0x40)
+                font_cache[key] = (name.split("+")[-1], bold, italic)
+            fname, bold, italic = font_cache[key]
+            obj = raw.FPDFText_GetTextObject(tp.raw, i)
+            mode = raw.FPDFTextObj_GetTextRenderMode(obj) if obj else raw.FPDF_TEXTRENDERMODE_FILL
+            if mode == raw.FPDF_TEXTRENDERMODE_INVISIBLE:
+                continue  # 화면에 보이지 않는 글 (스캔본의 OCR 글자층, 템플릿의 숨은 글 등)
+            z = order.get(ctypes.cast(obj, ctypes.c_void_p).value) if obj else None
+            if z is not None:
+                cx, cy = (left + right) / 2, h - (bottom + top) / 2
+                if any(oz > z and ob[0] <= cx <= ob[2] and ob[1] <= cy <= ob[3] for oz, ob in occluders):
+                    continue  # 나중에 그려진 도형에 가려진 글
+            if weight >= 600:
+                bold = True
+            elif not bold and mode == raw.FPDF_TEXTRENDERMODE_FILL_STROKE:
+                bold = True  # 채우기+윤곽선 = 굵은 글꼴이 없을 때 쓰는 '가짜 굵게'
+            color = "#000000"
+            if raw.FPDFText_GetFillColor(tp.raw, i, r, g, b, a):
+                color = f"#{r.value:02X}{g.value:02X}{b.value:02X}"
+            info.chars.append(Char(ch, (left, h - top, right, h - bottom), size, bold, italic, color, fname,
+                                   (ox.value, h - oy.value)))
+        tp.close()
+
+        # 그래픽 개체 (이미지, 선·도형). 쪽 전체를 덮는 배경은 뺀다.
+        page_area = w * h
+        for obj in page.get_objects(max_depth=4):
+            kind = {raw.FPDF_PAGEOBJ_IMAGE: "image", raw.FPDF_PAGEOBJ_PATH: "path",
+                    raw.FPDF_PAGEOBJ_SHADING: "shading"}.get(obj.type)
+            if kind is None:
+                continue
+            left, bottom, right, top = obj.get_bounds()
+            box = (left, h - top, right, h - bottom)
+            if (box[2] - box[0]) * (box[3] - box[1]) > 0.9 * page_area:
+                continue
+            fill = None
+            if kind == "path":
+                mode, stroke = ctypes.c_int(), ctypes.c_int()
+                if raw.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value:
+                    if raw.FPDFPageObj_GetFillColor(obj.raw, r, g, b, a) and a.value > 0:
+                        fill = f"#{r.value:02X}{g.value:02X}{b.value:02X}"
+            info.graphics.append(Graphic(kind, box, fill))
+
+        # 색 샘플링용 저해상도 이미지 (36 dpi)
+        try:
+            info._bitmap = page.render(scale=0.5).to_pil().convert("RGB")
+        except Exception:  # noqa: BLE001
+            info._bitmap = None
+        return info
+
+
+def _dedupe_overlaps(chars: list[Char]) -> list[Char]:
+    """그림자·외곽선 효과로 같은 글자를 거의 같은 자리에 두 번 그린 경우 한 번만 남긴다."""
+    out: list[Char] = []
+    seen: dict[tuple, int] = {}
+    for c in chars:
+        key = (c.text, round(c.origin[0] / 2), round(c.origin[1] / 2))
+        if c.text.strip() and key in seen:
+            continue
+        seen[key] = len(out)
+        out.append(c)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 상자 계산
+# ---------------------------------------------------------------------------
+
+
+def area(b: BBox) -> float:
+    return max(b[2] - b[0], 0) * max(b[3] - b[1], 0)
+
+
+def intersect(a: BBox, b: BBox) -> BBox | None:
+    x0, y0, x1, y1 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+    return (x0, y0, x1, y1) if x0 < x1 and y0 < y1 else None
+
+
+def inside_ratio(inner: BBox, outer: BBox) -> float:
+    """inner 중 outer 안에 들어간 비율."""
+    i = intersect(inner, outer)
+    a = area(inner)
+    if a == 0:  # 선처럼 면적이 없는 개체
+        cx, cy = (inner[0] + inner[2]) / 2, (inner[1] + inner[3]) / 2
+        return 1.0 if outer[0] <= cx <= outer[2] and outer[1] <= cy <= outer[3] else 0.0
+    return area(i) / a if i else 0.0
+
+
+def union(a: BBox, b: BBox) -> BBox:
+    return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+
+
+def expand(b: BBox, d: float) -> BBox:
+    return (b[0] - d, b[1] - d, b[2] + d, b[3] + d)
+
+
+def cluster(boxes: list[BBox], gap: float) -> list[BBox]:
+    """서로 gap 이내로 가까운 상자들을 하나로 묶는다."""
+    groups = [list(b) for b in boxes]
+    changed = True
+    while changed:
+        changed = False
+        out: list[list[float]] = []
+        for b in groups:
+            for o in out:
+                if intersect(expand(tuple(o), gap), tuple(b)):
+                    o[:] = union(tuple(o), tuple(b))
+                    changed = True
+                    break
+            else:
+                out.append(list(b))
+        groups = out
+    return [tuple(g) for g in groups]

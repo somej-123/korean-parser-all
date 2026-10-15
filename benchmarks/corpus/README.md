@@ -13,6 +13,21 @@ python run.py samples_web --out corpus_report.md
 | [OpenOffice 개조식 보고서 템플릿](https://templates.openoffice.org/) | DOCX (변환) | 1 | BSD |
 | [hwpxlib](https://github.com/neolord0/hwpxlib) `testFile` | HWPX | 49 | Apache-2.0 |
 
+## 나라장터 첨부파일로 시험하기
+
+실제 공공 문서(제안요청서·과업지시서)는 HWP·HWPX·PDF가 섞여 있어 좋은 시험 자료다.
+나라장터 웹사이트는 로그인을 거치므로, 공공데이터포털 API로 첨부파일 주소를 받는다.
+
+```bash
+# https://www.data.go.kr 에서 '조달청_나라장터 입찰공고정보서비스' 활용신청 → 일반 인증키 발급
+export G2B_SERVICE_KEY='발급받은 키'
+python fetch_g2b.py --days 7 --limit 30 --out samples_g2b
+python run.py samples_g2b --pdf --out g2b_report.md
+```
+
+받은 파일은 저장소에 올리지 않는다. 공고 문서의 재배포 조건은 공고마다 다를 수 있다.
+(이 스크립트는 API 명세 기준으로 작성했고, 서비스 키가 없어 아직 실제 호출로 검증하지 못했다.)
+
 ## 결과 (2026-10-15)
 
 | 항목 | 값 |
