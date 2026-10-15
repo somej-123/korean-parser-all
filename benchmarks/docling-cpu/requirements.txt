@@ -1,0 +1,5 @@
+# CPU 전용 torch를 먼저 설치하면 GPU용 대용량 패키지를 받지 않는다:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+docling>=2.50
+rapidocr>=3.4
+onnxruntime
