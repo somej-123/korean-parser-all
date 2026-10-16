@@ -44,16 +44,20 @@ def main(argv=None) -> int:
             failed += 1
             print(f"실패  {src.name}: {exc}", file=sys.stderr)
             continue
-        stem = out / src.stem
+        # with_suffix는 쓰지 않는다: '붙임. 3.(제안요청서) …'처럼 이름 가운데 점이 있으면 그 뒤를 확장자로 보고 잘라 버려
+        # 같은 공고의 붙임 파일들이 서로 덮어썼다
+        def target(ext: str, src=src) -> Path:
+            return out / f"{src.stem}{ext}"
+
         if "html" in formats:
-            stem.with_suffix(".html").write_text(render_html(doc, layout=args.layout), encoding="utf-8")
+            target(".html").write_text(render_html(doc, layout=args.layout), encoding="utf-8")
         if "llm" in formats:
-            stem.with_suffix(".llm.md").write_text(render_llm(doc), encoding="utf-8")
+            target(".llm.md").write_text(render_llm(doc), encoding="utf-8")
         if "json" in formats:
-            stem.with_suffix(".json").write_text(doc.model_dump_json(indent=1, exclude_none=True), encoding="utf-8")
+            target(".json").write_text(doc.model_dump_json(indent=1, exclude_none=True), encoding="utf-8")
         if "chunks" in formats:
             lines = (c.model_dump_json(exclude_none=True) for c in chunk(doc, max_tokens=args.max_tokens))
-            stem.with_suffix(".chunks.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            target(".chunks.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
         warn = f" (경고 {len(doc.warnings)}건)" if doc.warnings else ""
         print(f"완료  {src.name}  {time.perf_counter() - t0:.2f}s  블록 {len(doc.blocks)}개{warn}")
         for w in doc.warnings:
