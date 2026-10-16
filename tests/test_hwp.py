@@ -314,3 +314,15 @@ def test_ellipse_line_polygon_curve():
     assert (s.geometry, s.width, s.stroke, s.stroke_width_pt, s.tail_arrow, s.head_arrow) ==         ("line", 40.0, "#0000FF", 1.0, True, False)
     assert pg.shapes[0].path == "M0,20 L10,0 L20,20 Z"
     assert cv.shapes[0].path.startswith("M0,10 C") and not doc.warnings
+
+
+def test_compose_and_dutmal_text_comes_from_controls():
+    # 글자 겹침(tcps)·덧말(tdut)의 글은 문단 글(PARA_TEXT)이 아니라 컨트롤에 있다. 실제 제안요청서의 체크 표시
+    # '□'+'√' 겹침이 사라져 '□ 있음 ☑ 없음'에서 어느 칸에 체크했는지 알 수 없었다
+    tcps = rec(Tag.CTRL_HEADER, 1, b"spct" + wtext("□√") + struct.pack("<BbBB", 3, -3, 0, 2) + struct.pack("<2I", 7, 0xFFFFFFFF))
+    tdut = rec(Tag.CTRL_HEADER, 1, b"tudt" + wtext("大韓民國") + wtext("대한민국") + struct.pack("<5I", 0, 50, 0, 0, 3))
+    data = para(0, "□ 있음 " + ctrl(23, "tcps") + "없음", extra=tcps)
+    data += para(0, ctrl(23, "tdut") + " 만세", extra=tdut)
+    doc = HwpParser("compose.hwp", file=FakeFile(data)).parse()
+    texts = [b.text for b in doc.blocks if isinstance(b, Paragraph)]
+    assert "□ 있음 □√없음" in texts and "大韓民國(대한민국) 만세" in texts

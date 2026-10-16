@@ -57,6 +57,12 @@ _PAGE_TYPE = {0: "BOTH", 1: "EVEN", 2: "ODD"}
 
 # 문단 글(PARA_TEXT)의 제어 문자. 문자 하나짜리와, 뒤에 7글자(14바이트)가 더 붙는 것(인라인·확장 컨트롤)이 있다
 _CHAR_CTRL = {0, 10, 13, 24, 25, 26, 27, 28, 29, 30, 31}
+# 글자 겹침 테두리 (HWP 0~ 순서 = HWPX circleType)
+_COMPOSE_CIRCLE = dict(enumerate([
+    "CHAR", "SHAPE_CIRCLE", "SHAPE_REVERSAL_CIRCLE", "SHAPE_RECTANGLE", "SHAPE_REVERSAL_RECTANGLE", "SHAPE_TRIANGLE",
+    "SHAPE_REVERSAL_TIRANGLE", "SHAPE_LIGHT", "SHAPE_RHOMBUS", "SHAPE_REVERSAL_RHOMBUS", "SHAPE_ROUNDED_RECTANGLE",
+    "SHAPE_EMPTY_CIRCULATE_TRIANGLE", "SHAPE_THIN_CIRCULATE_TRIANGLE", "SHAPE_THICK_CIRCULATE_TRIANGLE",
+]))
 _EXT_CTRL = {1, 2, 3, 11, 12, 14, 15, 16, 17, 18, 21, 22, 23}  # CTRL_HEADER 레코드와 차례로 짝이 된다
 
 
@@ -459,6 +465,23 @@ class _Body:
                 rd = Reader(eq.data)
                 rd.u32()
                 _sub(_sub(run, "equation"), "script").text = rd.text()
+        elif cid == "tcps":
+            # 글자 겹침: 겹칠 글자는 문단 글이 아니라 컨트롤에 있다 (WORD 길이 + WCHAR[]).
+            # 실제 제안요청서의 '□'+'√'(체크한 네모) 6개가 이것이었다: 읽지 않으면 어느 칸에 체크했는지가 사라진다
+            rd = Reader(ctrl.data, 4)
+            text = rd.text()
+            circle, size, kind, count = rd.u8(), rd.i8(), rd.u8(), rd.u8()
+            _sub(run, "compose", composeText=text, circleType=_COMPOSE_CIRCLE.get(circle, "CHAR"), charSz=size,
+                 composeType="SPREAD" if kind else "OVERLAP", charPrCnt=count)
+        elif cid == "tdut":
+            # 덧말: 본말과 덧말 모두 컨트롤에 있다 (각각 WORD 길이 + WCHAR[]), 그 뒤 위치·크기 비율·정렬
+            rd = Reader(ctrl.data, 4)
+            main, sub = rd.text(), rd.text()
+            pos, ratio, option, style, align = (rd.u32() for _ in range(5))
+            el = _sub(run, "dutmal", posType=("TOP", "BOTTOM", "CENTER")[pos] if pos < 3 else "TOP", szRatio=ratio,
+                      option=option, styleIDRef=style, align=_ALIGN.get(align, "JUSTIFY"))
+            _sub(el, "mainText").text = main
+            _sub(el, "subText").text = sub
         elif cid in ("head", "foot"):
             rd = Reader(ctrl.data, 4)
             kind = "header" if cid == "head" else "footer"
