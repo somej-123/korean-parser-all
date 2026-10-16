@@ -39,11 +39,25 @@ korean-parser-all은 **문서 파서(엔진)**다. 원문에 있는 것을 빠�
 
 | 약속 | 내용 | 확인 |
 |---|---|---|
-| 형식 버전 | `Document.schema_version` (`ir.IR_VERSION`). 필드 추가는 두 번째 자리, 이름·의미 변경은 첫 자리를 올린다 | `tests/test_contract.py` |
+| 형식 버전 | `Document.schema_version` (`ir.IR_VERSION`, 현재 1.1). 필드 추가는 두 번째 자리, 이름·의미 변경은 첫 자리를 올린다 | `tests/test_contract.py` |
 | 결정성 | 같은 파일을 넣으면 블록 id·좌표까지 같은 결과 | `tests/test_contract.py`, `tests/test_pdf.py` |
 | JSON 왕복 | `Document.model_validate_json(doc.model_dump_json()) == doc` | `tests/test_contract.py` |
 | 블록 id | 문서 안에서 유일. HTML `data-kp-id`, LLM 텍스트 `<!-- b12 -->`, 조각의 `block_ids`가 같은 값 | `tests/test_contract.py` |
 | 실패를 숨기지 않음 | 못 읽은 개체(EMF, OLE, 신형 차트 등)는 `warnings`에 남긴다 | `benchmarks/corpus/` |
+
+## 함께 넘기는 메타데이터
+
+| 단위 | 항목 |
+|---|---|
+| 문서 (`Document.meta`) | 제목, 작성자, 작성일, 수정일, 언어 (파일에 적힌 값 그대로), 원본 파일 이름·형식 |
+| | `source_sha256`, `source_size_bytes`: 원본 파일 식별. 같은 문서가 다시 들어왔는지, 바뀌었는지 판별 |
+| | `parser_version`: 결과를 만든 파서 버전. 파서가 바뀐 뒤 재처리할 문서를 고를 때 |
+| | `page_count`, `page_count_source`: 쪽 수와 그 출처. `layout`(PDF, 정확) / `document_property`(DOCX가 저장 때 적어 둔 값, 실제와 다를 수 있음) / 없음(HWPX는 파일에 쪽 수가 없어 추정하지 않음) |
+| 문서 | `schema_version`, `warnings`, 용지 크기·여백 |
+| 블록 | `id`, `prov`(파서, 쪽, 좌표, 신뢰도), 종류, 제목 단계, 번호·개조식 계층, 서식 |
+| 조각 | 제목 경로, 블록 id, 쪽, 종류, 토큰 수, 블록별 쪽·좌표, 문서 메타데이터 전체(`doc_` 접두어) |
+
+파싱한 시각은 넣지 않는다. 넣으면 같은 파일이 같은 결과를 내지 않게 되므로, 저장하는 쪽(후속 프로젝트)이 붙인다.
 
 ## 후속 프로젝트로 넘기는 일
 

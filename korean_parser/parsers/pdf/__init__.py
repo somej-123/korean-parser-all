@@ -156,6 +156,8 @@ class PdfParser:
         m.author = (meta.get("Author") or "").strip() or None
         m.created = (meta.get("CreationDate") or "").strip() or None
         m.modified = (meta.get("ModDate") or "").strip() or None
+        m.page_count = len(self.pages)
+        m.page_count_source = "layout"
 
     def _page_setup(self, ddoc) -> None:
         """쪽 크기와, 본문 글이 놓인 범위로 여백을 추정한다."""

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import zipfile
 from pathlib import Path
 
@@ -97,8 +98,23 @@ def parse(path: str | Path, korean: bool = True) -> Document:
         doc = _PARSERS[fmt](path)
     except zipfile.BadZipFile as exc:
         raise DocumentError(f"{path.name}: 손상된 파일입니다 ({exc})") from exc
+    _stamp_source(doc, path)
     if korean:
         from ..enrich import enrich_korean
 
         enrich_korean(doc)
     return doc
+
+
+def _stamp_source(doc: Document, path: Path) -> None:
+    """원본 파일 해시·크기와 파서 버전을 문서 정보에 남긴다 (모든 형식 공통)."""
+    from .. import __version__
+
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    m = doc.meta
+    m.source_sha256 = h.hexdigest()
+    m.source_size_bytes = path.stat().st_size
+    m.parser_version = __version__

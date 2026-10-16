@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "korean-parser"
-version = "0.5.0"
+dynamic = ["version"]
 description = "한국어 문서 파서: 통합 문서 모델, 후처리 없는 HTML, LLM용 텍스트, 한국어 처리"
 readme = "README.md"
 license = "MIT"
@@ -27,6 +27,9 @@ visual = ["playwright>=1.40", "pypdfium2>=4", "pillow>=10"]
 
 [project.scripts]
 korean-parser = "korean_parser.__main__:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "korean_parser.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["korean_parser*"]

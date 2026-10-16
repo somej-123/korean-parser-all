@@ -133,10 +133,17 @@ class DocxParser:
     # ------------------------------------------------------------------
 
     def _read_meta(self) -> None:
+        m = self.doc.meta
+        app = self._xml("docProps/app.xml")
+        if app is not None:
+            # Word·LibreOffice가 저장할 때 적어 둔 쪽 수. 실제 배치를 하지 않으므로 그 값을 출처와 함께 넘긴다
+            pages = next((el.text for el in app.iter() if el.tag.rsplit("}", 1)[-1] == "Pages"), None)
+            if pages and pages.strip().isdigit() and int(pages) > 0:
+                m.page_count = int(pages)
+                m.page_count_source = "document_property"
         core = self._xml("docProps/core.xml")
         if core is None:
             return
-        m = self.doc.meta
 
         def text(tag):
             el = core.find(q(tag))

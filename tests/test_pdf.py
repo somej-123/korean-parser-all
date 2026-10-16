@@ -86,6 +86,10 @@ def test_llm_text(doc):
     assert "[그림: 그림 1." in text and "그림 안 글자:" in text
 
 
+def test_page_count_from_layout(doc):
+    assert doc.meta.page_count == 2 and doc.meta.page_count_source == "layout"
+
+
 def test_same_file_same_result(doc):
     # 레이아웃 모델을 써도 결과(블록 id, 좌표 포함)는 매번 같아야 한다
     assert parse(PDF).model_dump_json() == doc.model_dump_json()

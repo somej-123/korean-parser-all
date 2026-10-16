@@ -32,3 +32,33 @@ def test_block_ids_unique():
     for path in FILES:
         ids = [b.id for b in parse(path).iter_blocks() if b.id]
         assert len(ids) == len(set(ids)), path.name
+
+
+@pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)
+def test_source_identity_and_parser_version(path):
+    import hashlib
+
+    from korean_parser import __version__
+
+    m = parse(path).meta
+    assert m.source_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+    assert m.source_size_bytes == path.stat().st_size
+    assert m.parser_version == __version__
+
+
+def test_page_count_comes_with_its_source():
+    # DOCX: 저장한 프로그램이 docProps/app.xml에 적어 둔 값 (마지막 저장 때의 값이라 실제와 다를 수 있다)
+    m = parse(FIX / "korean_report.docx").meta
+    assert m.page_count == 1 and m.page_count_source == "document_property"
+    # HWPX: 파일에 쪽 수가 없으므로 추정하지 않고 비워 둔다
+    m = parse(FIX / "hwpx" / "rfp_example.hwpx").meta
+    assert m.page_count is None and m.page_count_source is None
+
+
+def test_chunks_carry_source_identity():
+    from korean_parser.chunk import chunk
+
+    doc = parse(FIX / "hwpx" / "rfp_example.hwpx")
+    meta = chunk(doc, max_tokens=500)[0].metadata()
+    assert meta["doc_source_sha256"] == doc.meta.source_sha256
+    assert meta["doc_parser_version"] == doc.meta.parser_version

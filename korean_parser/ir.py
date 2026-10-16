@@ -19,7 +19,7 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 
-IR_VERSION = "1.0"
+IR_VERSION = "1.1"
 
 
 class _Model(BaseModel):
@@ -357,6 +357,8 @@ class PageSetup(_Model):
 
 
 class Meta(_Model):
+    """문서 정보. 제목·작성자·날짜는 파일에 적힌 값 그대로다 (서식 파일의 값이 남아 있을 수 있다)."""
+
     title: str | None = None
     author: str | None = None
     created: str | None = None
@@ -364,6 +366,14 @@ class Meta(_Model):
     source_name: str | None = None
     source_format: str | None = None
     language: str | None = None
+    # 1.1: 원본 식별과 처리 정보 (같은 문서 판별, 재처리 대상 고르기)
+    source_sha256: str | None = None  # 원본 파일 바이트의 SHA-256 (16진수)
+    source_size_bytes: int | None = None
+    parser_version: str | None = None  # 이 결과를 만든 korean-parser 버전
+    page_count: int | None = None
+    # page_count의 출처. layout = 실제 쪽 배치(PDF), document_property = 저장한 프로그램이 파일에 적어 둔 값
+    # (DOCX docProps/app.xml. 마지막 저장 때의 값이라 실제와 다를 수 있다). HWPX는 파일에 쪽 수가 없어 비워 둔다
+    page_count_source: Literal["layout", "document_property"] | None = None
 
 
 class TextRun(_Model):
