@@ -89,3 +89,30 @@ def test_missing_space_after_punctuation(fixer):
 
 def test_numbers_with_punctuation_untouched(fixer):
     assert fixer.respace("비율은 3:1이고 1.5배 증가") == "비율은 3:1이고 1.5배 증가"
+
+
+@pytest.mark.parametrize("line, expected", [
+    ("1.산출물제출", "1. 산출물제출"),
+    ("Ⅱ.제안서", "Ⅱ. 제안서"),
+    ("※증빙 자료", "※ 증빙 자료"),
+    ("-데이터 이관", "- 데이터 이관"),
+    ("O하자보수", "○ 하자보수"),  # ○를 영문 O로 읽은 경우
+    ("ㅇOCR 인식률", "○ OCR 인식률"),
+    ("OCR 인식률", "OCR 인식률"),  # 영문 낱말은 그대로
+    ("0점 처리", "0점 처리"),  # 숫자 0 바로 뒤의 한글은 단위다
+    ("0 하자보수", "○ 하자보수"),
+    ("1.5배", "1.5배"),
+])
+def test_fix_ocr_marker(line, expected):
+    from korean_parser.spacing import fix_ocr_marker
+
+    assert fix_ocr_marker(line) == expected
+
+
+def test_respace_ocr_rules(fixer):
+    # OCR 글: 공백을 믿지 않고 다시 띄우되, 숫자와 기호 사이는 띄우지 않고 보조 용언 앞은 띄운다
+    out = fixer.respace_ocr("OCR인식률98%이상을목표로함")
+    assert "98%" in out and "98 %" not in out
+    assert fixer.respace_ocr("인력을투입하여야한다.").endswith("투입하여야 한다.")
+    assert fixer.respace_ocr("O산출물은HWPX와PDF형식으로제출").startswith("○ 산출")
+    assert "원(VAT" in fixer.respace_ocr("사업예산:1,250,000,000원(VAT포함)")

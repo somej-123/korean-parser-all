@@ -123,3 +123,26 @@ def test_split_paragraph_merge_rules():
     assert _SENTENCE_END.search("협상순위를 부여함")
     assert not _SENTENCE_END.search("기준으로 지급하며 병원과")
     assert match_marker("◦ 순찰(26코스)을 통해 시설물 점검") and not match_marker("사전에 협의하여 착용하고")
+
+
+def test_scanned_pdf_spacing(doc, tmp_path):
+    # 쪽 그림만 있는 PDF(스캔본)를 OCR로 읽어도, 쪽 그림의 글자 사이 빈칸으로 띄어쓰기를 되살린다.
+    # 텍스트 레이어로 읽은 결과와 어절이 대부분 같아야 한다 (OCR 글자 오류만큼은 다를 수 있다)
+    pytest.importorskip("onnxruntime")
+    import pypdfium2 as pdfium
+    from collections import Counter
+
+    src = pdfium.PdfDocument(PDF)
+    images = [src[i].render(scale=150 / 72).to_pil().convert("RGB") for i in range(len(src))]
+    scan = tmp_path / "scan.pdf"
+    images[0].save(scan, "PDF", resolution=150, save_all=True, append_images=images[1:])
+    ocr = parse(scan)
+    assert ocr.blocks and "OCR로 읽었습니다" in " ".join(ocr.warnings)
+
+    def words(d):
+        return Counter(" ".join(b.text for b in d.iter_blocks() if isinstance(b, (Paragraph, Heading))).split())
+
+    truth, pred = words(doc), words(ocr)
+    common = sum((truth & pred).values())
+    f1 = 2 * common / (sum(truth.values()) + sum(pred.values()))
+    assert f1 >= 0.85, f1  # 그림 빈칸을 쓰기 전에는 0.74

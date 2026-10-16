@@ -28,13 +28,15 @@ class PostprocessReport:
 
 
 def postprocess_docling(doc, fixer: SpacingFixer | None = None, respace: bool = True,
-                        keep_spacing: set[int] = frozenset()) -> PostprocessReport:
+                        keep_spacing: set[int] = frozenset(), ocr: bool = False) -> PostprocessReport:
     """본문 텍스트와 표 셀에 정규화와 띄어쓰기 교정을 적용한다.
 
     띄어쓰기 소실 여부는 문서 전체 텍스트로 한 번 판단한다.
     소실이 감지되면 기존 공백을 무시하고 다시 띄우고(reset),
     아니면 빠진 공백만 채운다. 원문은 각 항목의 `orig`에 남아 있다.
     keep_spacing: 띄어쓰기를 믿을 수 있는 항목의 id() (PDF 텍스트 레이어에서 다시 읽은 글). 정규화만 한다.
+    ocr: OCR 글이면 판단 없이 OCR용 규칙으로 다시 띄운다 (`SpacingFixer.respace_ocr`). OCR은 공백 대부분을 빠뜨리지만
+         일부는 남겨서 긴 어절 비율로 재는 '띄어쓰기 소실' 판단에 걸리지 않는다.
     """
     fixer = fixer or SpacingFixer()
 
@@ -44,11 +46,13 @@ def postprocess_docling(doc, fixer: SpacingFixer | None = None, respace: bool = 
     # 띄어쓰기 소실 판단은 믿을 수 없는 글(keep_spacing 밖)로만 한다
     loose = "\n".join([t.text for t in doc.texts if id(t) not in keep_spacing]
                       + [c.text for c in cells if id(c) not in keep_spacing])
-    reset = spacing_lost(loose) if loose.strip() else False
+    reset = ocr or (spacing_lost(loose) if loose.strip() else False)
 
     def fix(text: str, keep: bool = False) -> str:
         text = normalize_text(text)
-        return fixer.respace(text, reset=reset) if respace and not keep else text
+        if not respace or keep:
+            return text
+        return fixer.respace_ocr(text) if ocr else fixer.respace(text, reset=reset)
 
     texts_changed = 0
     for item in doc.texts:

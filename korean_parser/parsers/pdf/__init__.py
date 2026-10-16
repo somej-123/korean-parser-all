@@ -121,6 +121,29 @@ def _spacing_fixer():
     return _FIXER
 
 
+def _ocr_clusters(result) -> dict[int, list]:
+    """Docling 변환 결과의 OCR 상자: 쪽 번호 → [(레이아웃 영역 좌표, [OcrCell …]) …]. 좌표는 왼쪽 위 원점, pt."""
+    from .ocr_spacing import OcrCell
+
+    out: dict[int, list] = {}
+    for page in getattr(result, "pages", None) or []:
+        layout = page.predictions.layout if page.predictions else None
+        if layout is None:
+            continue
+        for cl in layout.clusters:
+            b = cl.bbox if cl.bbox.coord_origin.value == "TOPLEFT" else cl.bbox.to_top_left_origin(page.size.height)
+            cells = []
+            for c in cl.cells:
+                if not c.text.strip():
+                    continue
+                r = c.rect.to_bounding_box()
+                if r.coord_origin.value != "TOPLEFT":
+                    r = r.to_top_left_origin(page.size.height)
+                cells.append(OcrCell(c.text, (r.l, r.t, r.r, r.b)))
+            out.setdefault(page.page_no, []).append(((b.l, b.t, b.r, b.b), cells))
+    return out
+
+
 def _table_of(item, ddoc):
     """Docling 항목이 들어 있는 표 (부모를 따라 올라가 본다). 없으면 None."""
     from docling_core.types.doc import TableItem
@@ -195,9 +218,9 @@ class PdfParser:
         self._find_ruled_tables(ddoc)
         self._model_tables = {} if self.ocr else self._run_table_model(ddoc)
         # 텍스트 레이어가 있으면 글은 그 레이어에서 다시 읽는다 (Docling 글은 공백이 자주 빠진다).
-        # 다시 읽지 못한 글(OCR, 영역이 어긋난 글)만 형태소 분석으로 띄어쓰기를 복원한다.
-        keep = set() if self.ocr else self._restore_text_layer(ddoc)
-        report = postprocess_docling(ddoc, fixer=self.fixer, keep_spacing=keep)
+        # OCR 글은 쪽 그림의 글자 사이 빈칸으로 공백을 되살린다. 둘 다 못 한 글만 형태소 분석으로 띄어쓰기를 복원한다.
+        keep = self._restore_ocr_spacing(_ocr_clusters(result), ddoc) if self.ocr else self._restore_text_layer(ddoc)
+        report = postprocess_docling(ddoc, fixer=self.fixer, keep_spacing=keep, ocr=self.ocr)
         self.spacing_reset = report.spacing_reset
         for table, tdoc in self._model_tables.values():
             restored = self._restore_table_cells(table, tdoc)
@@ -295,6 +318,65 @@ class PdfParser:
                 keep.add(id(item))
         for table in ddoc.tables:
             keep |= self._restore_table_cells(table, ddoc)
+        return keep
+
+    def _restore_ocr_spacing(self, clusters: dict[int, list], ddoc) -> set[int]:
+        """OCR 글의 공백과 개조식 기호를 쪽 그림에서 되살린다 (`ocr_spacing`). 되살린 항목의 id() 모음.
+
+        Docling 글 항목은 레이아웃 영역(cluster) 하나의 OCR 상자들을 이은 것이다. 영역마다 줄을 묶어 줄 그림의 빈칸으로
+        공백을 정하고, 줄과 줄은 텍스트 레이어 글처럼 이어 붙인다 (한글-한글로 끊긴 자리는 형태소 분석).
+        그림과 맞지 않는 줄은 OCR용 형태소 분석 띄어쓰기를 쓴다.
+        """
+        from ...spacing import fix_ocr_marker
+        from .ocr_spacing import PageImage, cells_gaps, respace_cells, space_threshold
+
+        images: dict[int, PageImage] = {}
+
+        def image(n: int) -> PageImage:
+            if n not in images:
+                images[n] = PageImage(self.pages.pdf[n - 1])
+            return images[n]
+
+        # 공백으로 보는 빈칸 폭은 글꼴마다 다르다: 문서 전체 OCR 줄의 빈칸 폭 분포로 정한다
+        gap = space_threshold([g for n, cl in clusters.items() for _, cells in cl for g in cells_gaps(image(n), cells)])
+
+        def respaced(n: int, cells) -> str:
+            lines = [fix_ocr_marker(fixed) if fixed is not None else self.fixer.respace_ocr(normalize_text(raw))
+                     for fixed, raw in respace_cells(image(n), cells, gap)]
+            lines = [ln for ln in lines if ln.strip()]
+            return self._join_lines(lines) if lines else ""
+
+        keep: set[int] = set()
+        for item in ddoc.texts:
+            if len(item.prov) != 1:
+                continue
+            n, box = item.prov[0].page_no, self._box(item.prov[0], ddoc)
+            cells = next((cs for cb, cs in clusters.get(n, []) if max(abs(a - b) for a, b in zip(cb, box)) < 1.0), None)
+            if not cells:
+                continue
+            text = respaced(n, cells)
+            if text and "".join(text.split()).lstrip("□○■●-") == "".join(item.text.split()).lstrip("□○■●-Oo0ㅇㅁ"):
+                item.text = text
+                keep.add(id(item))
+        for table in ddoc.tables:
+            if len(table.prov) != 1:
+                continue
+            n = table.prov[0].page_no
+            ocr_cells = [c for cb, cs in clusters.get(n, []) for c in cs
+                         if inside_ratio(c.box, expand(self._box(table.prov[0], ddoc), 2)) > 0.6]
+            page_h = self.pages.page(n).height
+            for cell in table.data.table_cells:
+                if cell.bbox is None or not cell.text.strip():
+                    continue
+                b = cell.bbox if cell.bbox.coord_origin.value == "TOPLEFT" else cell.bbox.to_top_left_origin(page_height=page_h)
+                inner = [c for c in ocr_cells if b.l - 1 <= (c.box[0] + c.box[2]) / 2 <= b.r + 1
+                         and b.t - 1 <= (c.box[1] + c.box[3]) / 2 <= b.b + 1]
+                if not inner:
+                    continue
+                text = respaced(n, inner)
+                if text and "".join(text.split()) == "".join(cell.text.split()):
+                    cell.text = text
+                    keep.add(id(cell))
         return keep
 
     def _restore_table_cells(self, table, ddoc) -> set[int]:

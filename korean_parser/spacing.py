@@ -41,6 +41,14 @@ _HANGUL_RUN = re.compile(r"[가-힣]+")
 # 왼쪽이 한글일 때만 적용하므로 "1.5", "3:1" 같은 숫자 표기는 건드리지 않는다.
 _PUNCT_NO_SPACE = re.compile(r"(?<=[가-힣])([.,!?;:])(?=[가-힣\d])")
 
+# OCR 글 맨 앞의 개조식 기호·번호 뒤에 빠진 공백 ('1.산출물', '※증빙', '-데이터').
+# ○는 'O'·'0'·'ㅇ'으로 읽히는 경우가 많다. 'O'·'ㅇ'은 뒤가 한글이거나 공백일 때('OCR'은 그대로),
+# 숫자 '0'은 뒤가 공백일 때만 ○로 본다 ('0점 처리'의 0은 숫자다)
+_OCR_MARKER = re.compile(
+    r"^(?:([□■◇◆▣○●◦◎❍※·•\-])(?=[^\s\d])"
+    r"|((?:\d{1,2}|[IVXⅠ-Ⅹ]{1,4}|[가-하])\.)(?=[가-힣])"
+    r"|([Ooㅇ])(?=\s|[가-힣])|(0)(?=\s)|(ㅇ)(?=[A-Za-z]))\s*")
+
 
 @dataclass
 class SpacingStats:
@@ -99,6 +107,21 @@ class SpacingFixer:
         text = _PUNCT_NO_SPACE.sub(r"\1 ", text)
         return "\n".join(self._respace_line(line, reset) for line in text.split("\n"))
 
+    def respace_ocr(self, text: str) -> str:
+        """OCR 글의 띄어쓰기를 형태소 분석으로 처음부터 다시 한다 (쪽 그림으로 공백을 정하지 못한 줄에 쓴다).
+
+        reset=True와 같되 OCR 글에 맞춘 규칙을 더한다.
+        - 줄 맨 앞 기호·번호 뒤를 띄우고, 'O'·'0'·'ㅇ'으로 읽힌 ○를 되돌린다 (`fix_ocr_marker`)
+        - 새 공백은 한글 앞, 또는 한글 뒤의 숫자·영문 앞에만 넣는다 ('98 %이상을', '원 (VAT' 방지)
+        - 연결 어미 뒤의 보조 용언은 띄운다 ('투입하여야한다' → '투입하여야 한다')
+        명사와 명사 사이는 형태소 분석기처럼 띄운다. 붙여 두는 규칙도 시험했지만 정답 세트 어절 F1이 낮아졌다 (0.698 → 0.673).
+        """
+        if not text or not _HANGUL_RUN.search(text):
+            return text
+        text = "\n".join(fix_ocr_marker(ln) for ln in text.split("\n"))
+        text = _PUNCT_NO_SPACE.sub(r"\1 ", text)
+        return "\n".join(self._respace_line(line, True, ocr=True) for line in text.split("\n"))
+
     def join_lines(self, lines: list[str]) -> str:
         """한 문단에 속한 줄들을 합친다.
 
@@ -127,7 +150,8 @@ class SpacingFixer:
     # 내부 구현
     # ------------------------------------------------------------------
 
-    def _respace_line(self, line: str, reset: bool, extra_editable: set[int] = frozenset()) -> str:
+    def _respace_line(self, line: str, reset: bool, extra_editable: set[int] = frozenset(),
+                      ocr: bool = False) -> str:
         if not _HANGUL_RUN.search(line):
             return line
 
@@ -165,8 +189,19 @@ class SpacingFixer:
                 continue
             if 0 < pos < len(stripped) and stripped[pos - 1].isdigit() and is_hangul_syllable(stripped[pos]):
                 continue
+            if ocr and 0 < pos < len(stripped):
+                left, right = stripped[pos - 1], stripped[pos]
+                if not (is_hangul_syllable(right) or is_hangul_syllable(left) and right.isalnum()):
+                    continue
             spaces.add(pos)
             new_spaces.add(pos)
+
+        if ocr:
+            # 연결 어미 뒤의 보조 용언은 띄운다 ('하여야 한다', '되어야 하며')
+            for t in tokens:
+                if t.tag == "VX" and t.start > 0 and tag_at.get(t.start - 1) == "EC" and t.start not in inside_token:
+                    spaces.add(t.start)
+                    new_spaces.add(t.start)
 
         if reset:
             # 원래 있던 공백 중 Kiwi가 지운 것은, 한글-한글 또는 숫자-한글 사이일 때만 지운다.
@@ -185,6 +220,16 @@ class SpacingFixer:
                 out.append(" ")
             out.append(ch)
         return "".join(out)
+
+
+def fix_ocr_marker(line: str) -> str:
+    """OCR 줄 맨 앞의 개조식 기호·번호 뒤에 빠진 공백을 넣고, 'O'·'0'·'ㅇ'으로 읽힌 ○를 되돌린다."""
+    return _OCR_MARKER.sub(_marker_space, line)
+
+
+def _marker_space(m: re.Match) -> str:
+    marker = m.group(m.lastindex)
+    return ("○" if m.lastindex >= 3 else marker) + " "
 
 
 def _space_positions(text: str) -> set[int]:
