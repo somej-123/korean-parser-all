@@ -23,6 +23,7 @@ HTML(원본 모양)·LLM 텍스트·JSON·검색용 조각을 만든다. 저작�
 python -m venv .venv && . .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -e ".[dev,pdf,eval,visual]"
 python -m pytest -q                                  # PDF 시험은 Docling이 없으면 건너뛴다
+                                                     # samples_rfp/에 실제 문서(.hwp .pdf)가 있으면 그것도 시험한다 (test_real_samples.py)
 ```
 
 - PDF는 Docling 모델을, 스캔 PDF는 RapidOCR 모델을 처음 실행 때 내려받는다 (인터넷 필요).

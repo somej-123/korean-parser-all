@@ -77,6 +77,9 @@ ARCHITECTURE의 'OCR 띄어쓰기'). OCR이 빠뜨린 ○ □ 기호도 모양�
 
 - 실제 제안요청서 샘플(나라장터 첨부 PDF, 병원·KIND·국토교통 PDF): 재배포 조건이 불분명해 저장소에 넣지 않았다.
   로컬에서 다시 모을 때는 공개된 공고 첨부파일을 받아 `samples_rfp/` 폴더에 둔다 (.gitignore에 들어 있어 커밋되지 않는다).
+  이 폴더에 문서가 있으면 `tests/test_real_samples.py`가 그 문서로 돈다 (HWP: 미리보기 글, PDF: 텍스트 레이어 글자 97% 이상 보존,
+  목차를 표로 만들지 않음). 2026-10-16 로컬 PC에는 HWP 제안요청서 5개와 PDF 2개(온프레미스 RAG 제안요청서 40쪽,
+  한남대 산학협력단 입찰공고 8쪽)가 있었고 모두 통과했다 (PDF 글자 보존 0.989, 1.000).
 - 웹 샘플 코퍼스: `benchmarks/corpus/fetch_samples.sh samples_web` 로 다시 받는다 (POI·hwpxlib·OpenOffice).
 - 나라장터 API 수집(`benchmarks/corpus/fetch_g2b.py`): 공공데이터포털 서비스 키 필요(`G2B_SERVICE_KEY` 환경 변수).
   키는 채팅·저장소에 넣지 말 것. 아직 실제 호출로 검증하지 못했다.

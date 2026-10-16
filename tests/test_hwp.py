@@ -1,7 +1,7 @@
 """HWP 5.0 바이너리 파서 (parsers/hwp).
 
 재배포할 수 있는 HWP 시험 파일이 없어, 레코드를 바이트로 직접 만들어 넣는다 (OLE 파일 대신 FakeFile).
-실제 문서로는 samples_rfp/*.hwp가 있을 때만 돌린다 (재배포 조건이 불분명해 저장소에 넣지 않는다).
+실제 문서 시험은 tests/test_real_samples.py (samples_rfp/에 문서가 있을 때만).
 """
 
 import struct
@@ -194,22 +194,3 @@ def test_not_hwp_ole_is_refused(tmp_path):
     with pytest.raises(DocumentError):
         parse(fake)
 
-
-SAMPLES = sorted(Path(__file__).resolve().parents[1].glob("samples_rfp/*.hwp"))
-
-
-@pytest.mark.skipif(not SAMPLES, reason="samples_rfp/*.hwp 없음 (재배포할 수 없는 실제 문서)")
-@pytest.mark.parametrize("path", SAMPLES, ids=lambda p: p.name[:20])
-def test_real_documents_preview_text(path):
-    """실제 문서: 한컴오피스 미리보기 글(PrvText)의 앞부분이 결과에 그대로 나온다."""
-    import olefile
-
-    from korean_parser.parsers import parse
-
-    with olefile.OleFileIO(str(path)) as ole:
-        preview = ole.openstream("PrvText").read().decode("utf-16-le", "ignore")
-    want = "".join(ch for ch in preview if ch.isalnum())[:100]
-    doc = parse(path)
-    got = "".join(ch for ch in " ".join(b.text for b in doc.iter_blocks() if isinstance(b, (Heading, Paragraph)))
-                  if ch.isalnum())
-    assert want in got
