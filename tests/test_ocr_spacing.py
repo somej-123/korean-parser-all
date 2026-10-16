@@ -136,3 +136,26 @@ def test_group_lines():
     cells = [OcrCell("둘째 줄", (10, 30, 60, 42)), OcrCell("오른쪽", (70, 11, 120, 23)),
              OcrCell("첫 줄", (10, 10, 60, 22))]
     assert [[c.text for c in line] for line in group_lines(cells)] == [["첫 줄", "오른쪽"], ["둘째 줄"]]
+
+
+def test_scan_rules_keep_cell_borders_not_glyph_strokes():
+    # 스캔 쪽 그림의 괘선: 가로선 3개, 세로선 3개(양 끝이 가로선에 닿음)인 2×2 표. 칸 안 글자의 세로 획(10pt)은
+    # 길이로는 세로선과 비슷하지만 가로선에 닿지 않아 선이 아니다 (실제 스캔: 세로선 후보 97개 중 진짜는 6개)
+    from korean_parser.parsers.pdf.rules import build_grid
+    from korean_parser.parsers.pdf.scan_rules import image_rules
+
+    scale = 3.0
+    ink = np.zeros((int(120 * scale), int(320 * scale)), dtype=bool)
+
+    def px(v):
+        return int(v * scale)
+
+    for y in (20, 50, 80):  # 가로선 (20pt~300pt)
+        ink[px(y):px(y) + 2, px(20):px(300)] = True
+    for x in (20, 160, 300):  # 세로선 (20pt~80pt)
+        ink[px(20):px(80) + 2, px(x):px(x) + 2] = True
+    ink[px(23):px(33), px(60):px(60) + 2] = True  # 칸 안 글자의 세로 획
+    rules = image_rules(ink, scale)
+    assert sorted(round(r.pos) for r in rules if r.axis == "v") == [20, 160, 300]
+    grid = build_grid(rules, (20, 20, 300, 80))
+    assert (grid.n_rows, grid.n_cols) == (2, 2)

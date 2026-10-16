@@ -160,6 +160,11 @@ def test_real_scan_structure():
     assert fig.caption == "그림 1. 분기별 매출 추이" and fig.inner_text.startswith("분기별 매출(억원)")
     body = [b.text for b in scan.blocks if isinstance(b, Paragraph) and b.text.startswith("본 문서는")]
     assert len(body) == 6 and body[-1].endswith("업무를 수행합니다.")
+    # 표는 쪽 그림의 괘선으로 읽는다 (표 구조 모델은 두 줄 합친 '구분' 칸을 한 줄로 읽었다)
+    table = of(scan, Table)[0]
+    first = table.rows[0].cells
+    assert [c.blocks[0].text for c in first] == ["구분", "2026년"]
+    assert (first[0].row_span, first[1].col_span, len(table.rows)) == (2, 3, 4)
 
 
 def test_table_of_contents_lines_stay_paragraphs():

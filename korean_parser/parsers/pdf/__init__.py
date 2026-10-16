@@ -239,6 +239,8 @@ class PdfParser:
         self._seq = 0
         self._content: dict[int, BBox] = {}  # 쪽별 본문 영역
         self._ocr_cells: dict[int, list] = {}
+        self._page_images: dict = {}  # 쪽 번호 → 스캔 쪽 그림 (ocr_spacing.PageImage), 한 번만 그린다
+        self._ocr_gap: float | None = None  # 문서의 OCR 공백 기준 (em)
         self._done: set[str] = set()  # 블록으로 만든 Docling 항목 (그림이 뒤늦게 가져가지 않도록)
 
     def _new_id(self) -> str:
@@ -261,12 +263,12 @@ class PdfParser:
         ddoc = result.document
 
         self.fixer = _spacing_fixer()  # 형태소 분석기 로딩(약 2초)은 한 번만
+        clusters = _ocr_clusters(result) if self.ocr else {}
+        self._ocr_cells = {n: [c for _, cells in cl for c in cells] for n, cl in clusters.items()}  # 쪽 → OCR 글자 상자
         self._find_ruled_tables(ddoc)
         self._model_tables = {} if self.ocr else self._run_table_model(ddoc)
         # 텍스트 레이어가 있으면 글은 그 레이어에서 다시 읽는다 (Docling 글은 공백이 자주 빠진다).
         # OCR 글은 쪽 그림의 글자 사이 빈칸으로 공백을 되살린다. 둘 다 못 한 글만 형태소 분석으로 띄어쓰기를 복원한다.
-        clusters = _ocr_clusters(result) if self.ocr else {}
-        self._ocr_cells = {n: [c for _, cells in cl for c in cells] for n, cl in clusters.items()}  # 쪽 → OCR 글자 상자
         keep = self._restore_ocr_spacing(clusters, ddoc) if self.ocr else self._restore_text_layer(ddoc)
         report = postprocess_docling(ddoc, fixer=self.fixer, keep_spacing=keep, ocr=self.ocr)
         self.spacing_reset = report.spacing_reset
@@ -375,23 +377,14 @@ class PdfParser:
         공백을 정하고, 줄과 줄은 텍스트 레이어 글처럼 이어 붙인다 (한글-한글로 끊긴 자리는 형태소 분석).
         그림과 맞지 않는 줄은 OCR용 형태소 분석 띄어쓰기를 쓴다.
         """
-        from ...spacing import fix_ocr_marker
-        from .ocr_spacing import PageImage, cells_gaps, respace_cells, space_threshold
-
-        images: dict[int, PageImage] = {}
-
-        def image(n: int) -> PageImage:
-            if n not in images:
-                images[n] = PageImage(self.pages.pdf[n - 1])
-            return images[n]
+        from .ocr_spacing import cells_gaps, space_threshold
 
         # 공백으로 보는 빈칸 폭은 글꼴마다 다르다: 문서 전체 OCR 줄의 빈칸 폭 분포로 정한다
-        gap = space_threshold([g for n, cl in clusters.items() for _, cells in cl for g in cells_gaps(image(n), cells)])
+        self._ocr_gap = space_threshold([g for n, cl in clusters.items() for _, cells in cl
+                                         for g in cells_gaps(self._page_image(n), cells)])
 
         def respaced(n: int, cells) -> str:
-            lines = [fix_ocr_marker(fixed) if fixed is not None else self.fixer.respace_ocr(normalize_text(raw))
-                     for fixed, raw in respace_cells(image(n), cells, gap)]
-            lines = [ln for ln in lines if ln.strip()]
+            lines = self._ocr_lines(n, cells)
             return self._join_lines(lines) if lines else ""
 
         keep: set[int] = set()
@@ -426,6 +419,22 @@ class PdfParser:
                     cell.text = text
                     keep.add(id(cell))
         return keep
+
+    def _page_image(self, n: int):
+        from .ocr_spacing import PageImage
+
+        if n not in self._page_images:
+            self._page_images[n] = PageImage(self.pages.pdf[n - 1])
+        return self._page_images[n]
+
+    def _ocr_lines(self, n: int, cells) -> list[str]:
+        """OCR 상자들의 줄마다 글 (쪽 그림의 빈칸으로 공백을 되살림, 맞출 수 없는 줄은 형태소 분석)."""
+        from ...spacing import fix_ocr_marker
+        from .ocr_spacing import SPACE_GAP, respace_cells
+
+        lines = [fix_ocr_marker(fixed) if fixed is not None else self.fixer.respace_ocr(normalize_text(raw))
+                 for fixed, raw in respace_cells(self._page_image(n), cells, self._ocr_gap or SPACE_GAP)]
+        return [ln for ln in lines if ln.strip()]
 
     def _restore_table_cells(self, table, ddoc) -> set[int]:
         keep: set[int] = set()
@@ -957,6 +966,7 @@ class PdfParser:
         self._ruled_boxes: dict[int, list[BBox]] = {}
         self._extra_tables = []
         if self.ocr:
+            self._find_scan_grids(ddoc)
             return
         for item, _ in ddoc.iterate_items():
             if not isinstance(item, TableItem) or not item.prov:
@@ -981,6 +991,41 @@ class PdfParser:
             self._ruled[item.self_ref] = grid
         self._find_missed_grids(ddoc)
         self._find_open_continuations(ddoc)
+
+    def _find_scan_grids(self, ddoc) -> None:
+        """스캔본의 표: 쪽 그림에서 찾은 괘선(`scan_rules`)으로 격자를 만든다.
+
+        표 구조 인식 모델은 스캔에서 병합 칸을 자주 놓쳤다 (실제 스캔 '구분' 두 줄 병합 칸, 합성 스캔 표 TEDS 0.766).
+        표 영역 OCR 글자의 90% 이상이 격자 안에 있고, 격자가 2행 이하인데 모델이 4행 이상을 찾은 경우(행 구분선 없는 표)가
+        아닐 때만 쓴다. 쓰지 못하면 모델 결과 그대로.
+        """
+        from docling_core.types.doc import TableItem
+
+        from .ocr_spacing import SCALE
+        from .scan_rules import image_rules
+
+        rules: dict[int, list] = {}
+        for item, _ in ddoc.iterate_items():
+            if not isinstance(item, TableItem) or not item.prov:
+                continue
+            n, box = item.prov[0].page_no, self._box(item.prov[0], ddoc)
+            if n not in rules:
+                rules[n] = image_rules(self._page_image(n).ink, SCALE)
+            grid = build_grid(rules[n], box)
+            if grid is None or (grid.n_rows <= 2 and item.data.num_rows > 3):
+                continue
+            gbox = expand((grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1]), 1)
+            cells = [c for c in self._ocr_cells.get(n, []) if inside_ratio(c.box, expand(box, 2)) > 0.6]
+            inside = [c for c in cells if gbox[0] <= (c.box[0] + c.box[2]) / 2 <= gbox[2]
+                      and gbox[1] <= (c.box[1] + c.box[3]) / 2 <= gbox[3]]
+            if not cells or len(inside) < 0.9 * len(cells):
+                continue
+            seen = self._ruled_boxes.setdefault(n, [])
+            if any(inside_ratio(gbox, expand(b, 2)) > 0.9 for b in seen):
+                self._ruled[item.self_ref] = "dup"
+                continue
+            seen.append((grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1]))
+            self._ruled[item.self_ref] = grid
 
     def _find_open_continuations(self, ddoc) -> None:
         """쪽을 넘어간 열린 표의 나머지를 찾는다.
@@ -1115,9 +1160,14 @@ class PdfParser:
         for gc in grid.cells:
             cell = Cell(row_span=gc.r1 - gc.r0 + 1, col_span=gc.c1 - gc.c0 + 1, v_align="middle")
             inner = (gc.box[0] + 0.5, gc.box[1] + 0.5, gc.box[2] - 0.5, gc.box[3] - 0.5)
-            paragraphs = self._cell_paragraphs(page.text_lines(inner, pad=0))
+            if self.ocr:  # 스캔: 가운데가 칸 안에 있는 OCR 상자
+                ocr = [c for c in self._ocr_cells.get(page.number, [])
+                       if inner[0] <= (c.box[0] + c.box[2]) / 2 <= inner[2] and inner[1] <= (c.box[1] + c.box[3]) / 2 <= inner[3]]
+                paragraphs = self._cell_paragraphs(self._ocr_lines(page.number, ocr)) if ocr else []
+            else:
+                paragraphs = self._cell_paragraphs(page.text_lines(inner, pad=0))
             if paragraphs:
-                style, _ = self._text_style(page, inner)
+                style, _ = self._text_style(page, inner) if not self.ocr else (None, None)
                 layout = self._cell_align(page, inner)
                 cell.blocks = [Paragraph(id=self._new_id(), prov=self._prov(page.number, gc.box),
                                          inlines=[Text(text=t, style=style)], style=layout) for t in paragraphs]
