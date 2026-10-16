@@ -50,3 +50,20 @@ def test_evaluate_report_fields():
     truth = [{"type": "heading", "level": 1, "text": "Ⅰ. 사업 개요"}, para("본문입니다 충분히 긴 문장"), TABLE]
     out = evaluate(truth, truth)
     assert out["heading"]["recall"] == 1 and out["table_teds"] == 1 and out["reading_order"] == 1
+
+
+def test_table_pairing_prefers_whole_table_over_fragment():
+    # 쪽을 넘어 나뉜 표의 작은 조각은 낱말이 원래 표의 부분집합이라 낱말 집합 유사도가 100점이다.
+    # 짝은 TEDS가 높은 쪽(온전한 표)으로 지어야 한다
+    from metrics import table_scores
+
+    rows = [[cell("구분"), cell("내용")], [cell("설계"), cell("설계서")], [cell("구현"), cell("소스 코드")],
+            [cell("시험"), cell("시험 결과서")]]
+    whole = {"type": "table", "rows": rows}
+    fragment = {"type": "table", "rows": rows[2:]}
+    assert table_scores([whole], [fragment, whole])["teds"] == 1.0
+    assert table_scores([whole], [whole, fragment])["teds"] == 1.0  # 놓인 순서와 상관없다
+    # 표 두 개가 서로 다른 예측 표와 짝지어진다 (한 예측 표를 두 번 쓰지 않는다)
+    other = {"type": "table", "rows": [[cell("품목"), cell("수량")], [cell("서버"), cell("2")]]}
+    out = table_scores([whole, other], [other, whole])
+    assert out["teds"] == 1.0 and out["found"] == 1.0

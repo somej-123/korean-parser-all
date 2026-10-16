@@ -168,30 +168,33 @@ def teds(truth_table: dict, pred_table: dict, structure_only: bool = False) -> f
 
 
 def table_scores(truth: list[dict], pred: list[dict]) -> dict:
-    """정답 표마다 가장 비슷한 예측 표와 짝지어 TEDS를 잰다. 못 찾은 표는 0점."""
+    """정답 표와 예측 표를 일대일로 짝지어 TEDS를 잰다. 못 찾은 표는 0점.
+
+    글이 어느 정도 겹치는 쌍(낱말 집합 유사도 50 이상)만 후보로 두고, TEDS가 높은 쌍부터 짝짓는다.
+    예전에는 낱말 집합 유사도가 가장 높은 표를 골랐는데, 이 값은 한쪽 낱말이 다른 쪽의 부분집합이면 100점이라
+    쪽을 넘어 여러 조각으로 나뉜 예측 표가 있으면 작은 조각과 짝지어졌다 (띄어쓰기만 바뀌어도 짝이 바뀌었다).
+    """
     t_tables = [b for b in truth if b["type"] == "table"]
     p_tables = [b for b in pred if b["type"] == "table"]
     if not t_tables:
         return {}
-    used, teds_all, teds_s = set(), [], []
-    for tt in t_tables:
-        best, best_j = 0.0, None
+    pairs = []
+    for i, tt in enumerate(t_tables):
         tt_text = norm(block_text(tt))
         for j, pt in enumerate(p_tables):
-            if j in used:
-                continue
-            s = fuzz.token_set_ratio(tt_text, norm(block_text(pt)))
-            if s > best:
-                best, best_j = s, j
-        if best_j is None or best < 50:
-            teds_all.append(0.0)
-            teds_s.append(0.0)
+            if fuzz.token_set_ratio(tt_text, norm(block_text(pt))) >= 50:
+                pairs.append((teds(tt, pt), i, j))
+    teds_all, teds_s = [0.0] * len(t_tables), [0.0] * len(t_tables)
+    used_t, used_p = set(), set()
+    for score, i, j in sorted(pairs, key=lambda p: (-p[0], p[1], p[2])):
+        if i in used_t or j in used_p:
             continue
-        used.add(best_j)
-        teds_all.append(teds(tt, p_tables[best_j]))
-        teds_s.append(teds(tt, p_tables[best_j], structure_only=True))
+        used_t.add(i)
+        used_p.add(j)
+        teds_all[i] = score
+        teds_s[i] = teds(t_tables[i], p_tables[j], structure_only=True)
     return {"teds": sum(teds_all) / len(teds_all), "teds_s": sum(teds_s) / len(teds_s),
-            "found": sum(1 for x in teds_s if x > 0) / len(teds_s)}
+            "found": len(used_t) / len(t_tables)}
 
 
 def evaluate(truth: list[dict], pred: list[dict]) -> dict:
