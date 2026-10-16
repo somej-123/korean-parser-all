@@ -66,7 +66,7 @@ ARCHITECTURE의 'OCR 띄어쓰기'). OCR이 빠뜨린 ○ □ 기호도 모양�
 - (v0.9 완료) DOCX·HWPX·HWP에서 '굵고 큰 번호 문단'으로 쓴 제목: 사용자와 정한 대로 문단은 그대로 두고
   `Paragraph.heading_guess`(추정 단계, 근거)만 붙인다 (IR 1.2). `evaluate.py --heading-guess`로 추정 포함 점수를 따로 본다.
 - HWPX: 문단 중간에 놓인 글상자 글이 문단 앞에 나온다 (미리보기와 순서 차이).
-- PDF 표: 점선·선 굵기를 실선으로 그림. 굵은 글꼴 정보가 없는 PDF의 머리 행 굵게.
+- (완료) PDF 표의 점선·파선·선 굵기 (`rules.line_style`). 남은 것: 굵은 글꼴 정보가 없는 PDF의 머리 행 굵게.
 - (v0.10.1 완료) 스캔 PDF 제목 단계: 번호 종류 순서로 (0.572 → 1.000).
 - (v0.11 완료) PPTX·XLSX 파서. 남은 것: 슬라이드 원래 배치(fixed) 화면, 글 없는 도형 그리기, XLSX 차트·그림,
   Office 2016 신형 차트(chartex). 실제 PPTX·XLSX 문서로는 아직 확인하지 못했다 (samples_rfp/에 넣으면 test_real_samples가 연다).

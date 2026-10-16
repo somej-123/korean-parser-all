@@ -104,6 +104,7 @@ class GridCell:
     c1: int  # 끝 열 (포함)
     box: tuple[float, float, float, float]
     borders: dict[str, bool] = field(default_factory=dict)  # top/bottom/left/right 선이 있는지
+    line_styles: dict[str, tuple[str, float]] = field(default_factory=dict)  # 변 → (solid·dashed·dotted, 굵기 pt)
 
 
 @dataclass
@@ -237,8 +238,35 @@ def build_grid(rules: list[Rule], box: tuple[float, float, float, float], pad: f
             "right": c1 + 1 < nc and all(vline(c1 + 1, i) for i in range(r0, r1 + 1)) or (
                 c1 + 1 == nc and all(_covered(_near(V, xs[-1]), ys[i], ys[i + 1]) for i in range(r0, r1 + 1))),
         }))
+    for gc in cells:
+        x0, y0, x1, y1 = gc.box
+        for side, has in gc.borders.items():
+            if has:
+                axis, pos, a, b = {"top": ("h", y0, x0, x1), "bottom": ("h", y1, x0, x1),
+                                   "left": ("v", x0, y0, y1), "right": ("v", x1, y0, y1)}[side]
+                gc.line_styles[side] = line_style(rules, axis, pos, a, b)
     cells.sort(key=lambda c: (c.r0, c.c0))
     return Grid(xs, ys, cells)
+
+
+def line_style(rules: list[Rule], axis: str, pos: float, a: float, b: float) -> tuple[str, float]:
+    """칸 변 하나의 선 모양: 그 자리의 원래 선 조각들로 정한다.
+
+    아주 짧은 조각(2.5pt 미만)이 넷 이상이면 점선, 8pt 미만 조각이 셋 이상이면 파선, 아니면 실선.
+    굵기는 조각 굵기의 중앙값 (얇게 채운 사각형은 높이, 윤곽선은 선 굵기).
+    """
+    import statistics
+
+    pieces = [r for r in rules if r.axis == axis and abs(r.pos - pos) <= 2 and r.b > a + 0.5 and r.a < b - 0.5]
+    if not pieces:
+        return "solid", 0.5
+    lengths = [r.b - r.a for r in pieces]
+    width = round(statistics.median(r.width for r in pieces), 2)
+    if len(pieces) >= 4 and statistics.median(lengths) < 2.5:
+        return "dotted", width
+    if len(pieces) >= 3 and statistics.median(lengths) < 8:
+        return "dashed", width
+    return "solid", width
 
 
 def _dedupe(vals: list[float], gap: float) -> list[float]:

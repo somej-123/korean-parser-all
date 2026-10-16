@@ -55,3 +55,17 @@ def test_region_grows_along_lines():
 def test_not_a_ruled_table():
     assert build_grid([h(0, 0, 200)], (0, 0, 200, 50)) is None          # 선 하나
     assert build_grid([h(0, 0, 200), h(50, 0, 200)], (0, 0, 200, 50)) is None  # 열 구분 없음
+
+
+def test_line_style_and_width_per_side():
+    # 위: 1.2pt 조각을 1pt 간격으로 이은 점선, 아래: 1.5pt 굵은 실선, 가운데 가로선: 5pt 조각의 파선
+    top = [Rule("h", 0, x, x + 1.2, 0.7) for x in [i * 2.2 for i in range(int(200 / 2.2))]]
+    middle = [Rule("h", 50, x, x + 5, 0.5) for x in range(0, 200, 7)]
+    rules = top + middle + [Rule("h", 100, 0, 200, 1.5), v(0, 0, 100), v(200, 0, 100), v(100, 0, 100)]
+    grid = build_grid(rules, (0, 0, 200, 100))
+    first = next(c for c in grid.cells if (c.r0, c.c0) == (0, 0))
+    last = next(c for c in grid.cells if (c.r0, c.c0) == (1, 0))
+    assert first.line_styles["top"] == ("dotted", 0.7)
+    assert first.line_styles["bottom"][0] == "dashed"
+    assert last.line_styles["bottom"] == ("solid", 1.5)
+    assert first.line_styles["left"] == ("solid", 0.5)

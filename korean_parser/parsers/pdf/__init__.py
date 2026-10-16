@@ -1043,7 +1043,6 @@ class PdfParser:
         # 글 위치로 정한 격자(열린 표)는 선으로 읽은 격자보다 덜 확실하다
         table = Table(id=self._new_id(), prov=self._prov(page.number, gbox, confidence=1.0 if grid.source == "rules" else 0.8),
                       width_pt=round(gbox[2] - gbox[0], 1))
-        line = Border(style="solid", width_pt=0.5, color="#000000")
         rows = [Row(height_pt=round(grid.ys[i + 1] - grid.ys[i], 1)) for i in range(grid.n_rows)]
         for gc in grid.cells:
             cell = Cell(row_span=gc.r1 - gc.r0 + 1, col_span=gc.c1 - gc.c0 + 1, v_align="middle")
@@ -1057,7 +1056,11 @@ class PdfParser:
             bg = page.fill_at((gc.box[0] + gc.box[2]) / 2, (gc.box[1] + gc.box[3]) / 2)
             if bg and _luma(bg) > 90:
                 cell.background = bg
-            cell.borders = Borders(**{side: line for side, has in gc.borders.items() if has})
+            # 원래 선의 모양(실선·파선·점선)과 굵기. 글 위치로 정한 격자처럼 모양 정보가 없으면 0.5pt 실선
+            cell.borders = Borders(**{side: Border(style=gc.line_styles.get(side, ("solid", 0.5))[0],
+                                                   width_pt=max(gc.line_styles.get(side, ("solid", 0.5))[1], 0.25),
+                                                   color="#000000")
+                                      for side, has in gc.borders.items() if has})
             rows[gc.r0].cells.append(cell)
         table.rows = rows
         table.col_widths_pt = [round(grid.xs[j + 1] - grid.xs[j], 1) for j in range(grid.n_cols)]
