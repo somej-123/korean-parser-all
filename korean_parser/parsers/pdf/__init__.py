@@ -22,10 +22,10 @@ from ...ir import (
     Block, Border, Borders, Cell, Document, Figure, FixedPage, Heading, Image, Meta, PageBreak,
     PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Table, Text, TextRun, TextStyle,
 )
-from ...normalize import is_hangul_syllable
+from ...normalize import is_hangul_syllable, normalize_text
 from ...outline import match_marker
 from .rules import build_grid
-from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, inside_ratio
+from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, inside_ratio, union
 
 PARSER_NAME = "pdf-docling"
 _CAPTION = re.compile(r"^[\[<(]?\s*(그림|표|도표|사진|Figure|Fig\.?|Table)\s*[\d IVX]+", re.I)
@@ -36,8 +36,9 @@ class PdfEngineMissing(RuntimeError):
     pass
 
 
-def _converter(ocr: bool, lang: str, threads: int):
-    key = (ocr, lang, threads)
+def _converter(ocr: bool, lang: str, threads: int, tables: bool = True):
+    """Docling 변환기 (설정마다 한 번만 만든다). tables=False면 표 구조 인식 모델(TableFormer)을 돌리지 않는다."""
+    key = (ocr, lang, threads, tables)
     if key in _CONVERTERS:
         return _CONVERTERS[key]
     try:
@@ -51,7 +52,7 @@ def _converter(ocr: bool, lang: str, threads: int):
     opts = PdfPipelineOptions()
     opts.accelerator_options = AcceleratorOptions(num_threads=threads, device=AcceleratorDevice.CPU)
     opts.table_structure_options.mode = TableFormerMode.FAST
-    opts.do_table_structure = True
+    opts.do_table_structure = tables
     opts.do_ocr = ocr
     if ocr:
         opts.ocr_options = RapidOcrOptions(lang=[lang], mode=OcrMode.FULL_PAGE)
@@ -67,6 +68,63 @@ def parse_pdf(path: str | Path, ocr: bool | None = None, ocr_lang: str = "korean
     fixed_layout=True면 원본 모양 재현용 쪽(바탕 그림 + 원래 위치의 글)도 만든다 (텍스트 레이어가 있을 때).
     """
     return PdfParser(path, ocr=ocr, ocr_lang=ocr_lang, fixed_layout=fixed_layout).parse()
+
+
+_SENTENCE_END = re.compile(r"([.!?。:;]|[다요음함임됨것][.)]?)\s*$")
+
+
+def _first_style(p):
+    return next((x.style for x in p.inlines if isinstance(x, Text) and x.text.strip() and x.style), None)
+
+
+_FIXER = None
+_JOIN_CACHE: dict[tuple[str, str], bool] = {}
+
+
+def _spacing_fixer():
+    global _FIXER
+    if _FIXER is None:
+        from ...spacing import SpacingFixer
+
+        _FIXER = SpacingFixer()
+    return _FIXER
+
+
+def _table_of(item, ddoc):
+    """Docling 항목이 들어 있는 표 (부모를 따라 올라가 본다). 없으면 None."""
+    from docling_core.types.doc import TableItem
+
+    node = item
+    for _ in range(8):
+        parent = getattr(node, "parent", None)
+        if parent is None:
+            return None
+        node = parent.resolve(ddoc)
+        if isinstance(node, TableItem):
+            return node
+    return None
+
+
+def _rows_without_lines(grid, page: PageInfo) -> bool:
+    """선 없이 여러 행을 둔 표(머리 행 아래에만 선)인가: 마지막 행에서 두 칸 이상이 같은 높이에 여러 줄을 두었다."""
+    last = [c for c in grid.cells if c.r1 == grid.n_rows - 1]
+    baselines = []
+    for c in last:
+        ys = sorted({round(ch.origin[1]) for ch in page.chars_in(c.box, 0) if ch.text.strip()})
+        if len(ys) >= 2:
+            baselines.append(ys)
+    if len(baselines) < 2:
+        return False
+    shared = [y for y in baselines[0] if any(abs(y - z) <= 2 for z in baselines[1])]
+    return len(shared) >= 2
+
+
+def _iou(a: BBox, b: BBox) -> float:
+    ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
 
 
 _SPACE_BEFORE_PUNCT = re.compile(r"(?<=[가-힣]) +(?=[.,](?:\s|$))")
@@ -95,18 +153,26 @@ class PdfParser:
 
     def parse(self) -> Document:
         from ...docling_adapter import postprocess_docling
-        from ...spacing import SpacingFixer
 
-        threads = int(os.environ.get("KP_THREADS", os.cpu_count() or 4))
-        result = _converter(self.ocr, self.ocr_lang, threads).convert(self.path)
+        self.threads = int(os.environ.get("KP_THREADS", os.cpu_count() or 4))
+        # 텍스트 레이어가 있으면 표 구조 인식 모델 없이 먼저 돌린다. 표 대부분은 괘선으로 읽고,
+        # 괘선으로 읽지 못한 표가 있는 쪽만 모델을 다시 돌린다 (모델이 처리 시간의 절반 이상을 차지한다)
+        result = _converter(self.ocr, self.ocr_lang, self.threads, tables=self.ocr).convert(self.path)
         ddoc = result.document
 
-        self.fixer = SpacingFixer()
+        self.fixer = _spacing_fixer()  # 형태소 분석기 로딩(약 2초)은 한 번만
+        self._find_ruled_tables(ddoc)
+        self._model_tables = {} if self.ocr else self._run_table_model(ddoc)
         # 텍스트 레이어가 있으면 글은 그 레이어에서 다시 읽는다 (Docling 글은 공백이 자주 빠진다).
         # 다시 읽지 못한 글(OCR, 영역이 어긋난 글)만 형태소 분석으로 띄어쓰기를 복원한다.
         keep = set() if self.ocr else self._restore_text_layer(ddoc)
         report = postprocess_docling(ddoc, fixer=self.fixer, keep_spacing=keep)
         self.spacing_reset = report.spacing_reset
+        for table, tdoc in self._model_tables.values():
+            restored = self._restore_table_cells(table, tdoc)
+            for cell in table.data.table_cells:
+                if id(cell) not in restored:
+                    cell.text = self.fixer.respace(normalize_text(cell.text), reset=report.spacing_reset)
         if self.ocr:
             self.doc.warnings.append("텍스트 레이어가 없어 OCR로 읽었습니다. 글자 서식은 복원되지 않습니다.")
         if report.garbled:
@@ -197,19 +263,55 @@ class PdfParser:
                 item.text = text
                 keep.add(id(item))
         for table in ddoc.tables:
-            if len(table.prov) != 1:
-                continue
-            page = self.pages.page(table.prov[0].page_no)
-            for cell in table.data.table_cells:
-                if cell.bbox is None:
-                    continue
-                b = cell.bbox if cell.bbox.coord_origin.value == "TOPLEFT" else cell.bbox.to_top_left_origin(
-                    page_height=page.height)
-                text = self._layer_text(page, (b.l, b.t, b.r, b.b), cell.text)
-                if text is not None:
-                    cell.text = text
-                    keep.add(id(cell))
+            keep |= self._restore_table_cells(table, ddoc)
         return keep
+
+    def _restore_table_cells(self, table, ddoc) -> set[int]:
+        keep: set[int] = set()
+        if len(table.prov) != 1:
+            return keep
+        page = self.pages.page(table.prov[0].page_no)
+        for cell in table.data.table_cells:
+            if cell.bbox is None:
+                continue
+            b = cell.bbox if cell.bbox.coord_origin.value == "TOPLEFT" else cell.bbox.to_top_left_origin(
+                page_height=page.height)
+            text = self._layer_text(page, (b.l, b.t, b.r, b.b), cell.text)
+            if text is not None:
+                cell.text = text
+                keep.add(id(cell))
+        return keep
+
+    def _run_table_model(self, ddoc) -> dict:
+        """괘선으로 읽지 못한 표가 있는 쪽만 표 구조 인식 모델로 다시 변환한다. 표 self_ref → (모델 결과 표, 그 문서)."""
+        from docling_core.types.doc import TableItem
+
+        pending = [it for it, _ in ddoc.iterate_items()
+                   if isinstance(it, TableItem) and it.prov and it.self_ref not in self._ruled]
+        if not pending:
+            return {}
+        pages = sorted({it.prov[0].page_no for it in pending})
+        ranges: list[list[int]] = []
+        for p in pages:  # 이어진 쪽은 한 번에
+            if ranges and p == ranges[-1][1] + 1:
+                ranges[-1][1] = p
+            else:
+                ranges.append([p, p])
+        conv = _converter(False, self.ocr_lang, self.threads, tables=True)
+        found: list[tuple[int, BBox, object, object]] = []
+        for a, b in ranges:
+            tdoc = conv.convert(self.path, page_range=(a, b)).document
+            for it, _ in tdoc.iterate_items():
+                if isinstance(it, TableItem) and it.prov:
+                    found.append((it.prov[0].page_no, self._box(it.prov[0], tdoc), it, tdoc))
+        out = {}
+        for it in pending:
+            page_no, box = it.prov[0].page_no, self._box(it.prov[0], ddoc)
+            best = max(((_iou(box, fb), ft, fd) for fp, fb, ft, fd in found if fp == page_no),
+                       key=lambda x: x[0], default=None)
+            if best and best[0] > 0.3:
+                out[it.self_ref] = (best[1], best[2])
+        return out
 
     def _layer_text(self, page: PageInfo, box: BBox, original: str) -> str | None:
         """영역 안 텍스트 레이어 글. Docling 글과 (공백을 빼고) 같은 내용일 때만 쓴다."""
@@ -257,6 +359,12 @@ class PdfParser:
         lw, rw = left.split(), right.split()
         if not lw or not rw:
             return False
+        key = (" ".join(lw[-2:]), " ".join(rw[:2]))
+        if key not in _JOIN_CACHE:
+            _JOIN_CACHE[key] = self._decide_space(lw, rw)
+        return _JOIN_CACHE[key]
+
+    def _decide_space(self, lw: list[str], rw: list[str]) -> bool:
         if is_hangul_syllable(lw[-1][-1]) and is_hangul_syllable(rw[0][0]):
             a, b = " ".join(lw[-2:]), " ".join(rw[:2])  # 줄바꿈 자리: 앞뒤 두 어절을 보고 그 자리만 정한다
             joined = self.fixer.join_lines([a, b])
@@ -287,23 +395,20 @@ class PdfParser:
 
         skip: set[str] = set()
         last_page = None
-        self._find_ruled_tables(ddoc)
         for item, _level in ddoc.iterate_items(included_content_layers={ContentLayer.BODY}):
             if item.self_ref in skip or not getattr(item, "prov", None):
                 continue
             prov = item.prov[0]
             page_no, box = prov.page_no, self._box(prov, ddoc)
             page = self.pages.page(page_no)
-            if isinstance(item, TextItem) and self._in_ruled_table(page_no, box):
-                continue  # 괘선 표 안의 글인데 Docling이 표 밖 글로 본 것 (표에 이미 들어 있다)
+            if isinstance(item, TextItem) and self._covered_by_table(item, page_no, box, ddoc):
+                continue  # 표가 이미 담고 있는 글 (표 구조 모델을 끄면 표 안 글이 따로 나온다)
             if last_page is not None and page_no != last_page:
                 self.doc.blocks.append(PageBreak(id=self._new_id(), prov=self._prov(page_no, None)))
             last_page = page_no
 
             if isinstance(item, TableItem):
-                table = self._table(item, page, box, ddoc)
-                if table is not None:  # None: 앞의 표와 같은 괘선 표 (Docling이 한 표를 둘로 나눈 경우)
-                    self.doc.blocks.append(table)
+                self.doc.blocks.extend(self._table(item, page, box, ddoc))
                 for c in item.captions:
                     skip.add(c.cref)
                     cap = c.resolve(ddoc)
@@ -352,6 +457,8 @@ class PdfParser:
             misplaced.append(self._paragraph(item, page, box))
         for blk in misplaced:
             self._insert_by_position(blk)
+        if not self.ocr:
+            self._merge_split_paragraphs()
         self._attach_captions()
         self._vertical_spacing()
 
@@ -383,6 +490,85 @@ class PdfParser:
                 self.doc.blocks.insert(i, blk)
                 return
         self.doc.blocks.append(blk)
+
+    # ------------------------------------------------------------------
+    # 끊긴 문단 잇기
+    # ------------------------------------------------------------------
+
+    def _merge_split_paragraphs(self) -> None:
+        """한 문단이 둘로 나뉜 곳을 잇는다.
+
+        Docling은 내어쓰기한 문단(둘째 줄부터 들여 쓴 개조식 문단)의 이어지는 줄을 다른 문단으로 떼거나,
+        쪽이 넘어가는 문단을 쪽마다 따로 둔다. 다음을 모두 만족하면 같은 문단으로 본다.
+        - 앞 문단의 마지막 줄이 본문 오른쪽 끝까지 찼다 (줄이 넘어간 것)
+        - 앞 문단이 문장으로 끝나지 않았다
+        - 뒤 문단이 개조식 기호·번호로 시작하지 않고, 글자 크기·굵기가 같다
+        - 같은 쪽이면 바로 아래 줄(줄 간격 이내), 다른 쪽이면 앞 쪽의 마지막 문단과 다음 쪽의 첫 문단
+        """
+        blocks = self.doc.blocks
+        out: list[Block] = []
+        i = 0
+        while i < len(blocks):
+            b = blocks[i]
+            out.append(b)
+            i += 1
+            while isinstance(b, Paragraph):
+                j = i
+                while j < len(blocks) and isinstance(blocks[j], PageBreak):
+                    j += 1
+                if j >= len(blocks) or not self._continues(b, blocks[j], crossed_page=j > i):
+                    break
+                self._absorb(b, blocks[j])
+                if j > i:
+                    out.extend(blocks[i:j])  # 쪽 나눔 표시는 남긴다 (이은 문단 뒤로)
+                i = j + 1
+        self.doc.blocks = out
+
+    def _continues(self, a: Paragraph, b: Block, crossed_page: bool) -> bool:
+        if not isinstance(b, Paragraph) or not a.prov or not b.prov or not a.prov.bbox or not b.prov.bbox:
+            return False
+        ta, tb = a.text.strip(), b.text.strip()
+        if not ta or not tb or _SENTENCE_END.search(ta) or match_marker(tb) or _CAPTION.match(tb):
+            return False
+        sa, sb = _first_style(a), _first_style(b)
+        if sa and sb and (abs((sa.size_pt or 0) - (sb.size_pt or 0)) > 0.6 or bool(sa.bold) != bool(sb.bold)):
+            return False
+        size = (sa.size_pt if sa and sa.size_pt else 10.0)
+        ab, bb = a.prov.bbox, b.prov.bbox
+        if crossed_page:
+            if b.prov.page != a.prov.page + 1:
+                return False
+        elif b.prov.page != a.prov.page or not (0 <= bb[1] - ab[3] <= size * 1.0) or bb[0] > ab[2] or bb[2] < ab[0]:
+            return False
+        # 앞 문단의 마지막 줄이 본문 오른쪽 끝까지 찼는가
+        page = self.pages.page(a.prov.page)
+        chars = [c for c in page.chars_in(ab) if c.text.strip()]
+        content = self._content.get(a.prov.page)
+        if not chars or not content:
+            return False
+        last = max(c.origin[1] for c in chars)
+        line = [c for c in chars if abs(c.origin[1] - last) < size * 0.5]
+        right, left = max(c.box[2] for c in line), min(c.box[0] for c in line)
+        # 오른쪽 정렬한 짧은 줄('2023년 2월 28일 제정')은 끝까지 찬 줄이 아니다: 줄 길이도 본문 폭의 절반 이상이어야 한다
+        return right >= content[2] - max(size * 1.5, 10) and right - left >= (content[2] - content[0]) * 0.5
+
+    def _absorb(self, a: Paragraph, b: Paragraph) -> None:
+        """b를 a 뒤에 잇는다. 이은 자리의 공백은 줄 합치기와 같은 규칙으로 정한다."""
+        ta, tb = a.text.rstrip(), b.text.lstrip()
+        if is_hangul_syllable(ta[-1:]) and is_hangul_syllable(tb[:1]):
+            sep = " " if self._space_at_join(ta, tb) else ""
+        elif ta.endswith("-") and ta[-2:-1].isascii() and ta[-2:-1].isalpha():
+            sep = ""
+        else:
+            sep = " "
+        if a.inlines and isinstance(a.inlines[-1], Text):
+            a.inlines[-1] = a.inlines[-1].model_copy(update={"text": a.inlines[-1].text.rstrip() + sep})
+        rest = [x.model_copy() for x in b.inlines]
+        if rest and isinstance(rest[0], Text):
+            rest[0] = rest[0].model_copy(update={"text": rest[0].text.lstrip()})
+        a.inlines.extend(rest)
+        if b.prov.page == a.prov.page:
+            a.prov = a.prov.model_copy(update={"bbox": tuple(round(v, 1) for v in union(a.prov.bbox, b.prov.bbox))})
 
     def _attach_captions(self) -> None:
         """'그림 1. …', '[표 2] …' 같은 문단이 그림 바로 앞뒤에 있으면 그림의 캡션으로 붙인다."""
@@ -501,7 +687,8 @@ class PdfParser:
             prov = item.prov[0]
             page, box = self.pages.page(prov.page_no), self._box(prov, ddoc)
             grid = build_grid(page.rules, box)
-            if grid is None or not self._grid_fits(grid, page, box, item.data.num_rows):
+            rows = item.data.num_rows if self.ocr else None  # 표 구조 모델을 돌리지 않았으면 행 수를 모른다
+            if grid is None or not self._grid_fits(grid, page, box, rows):
                 continue
             gbox = (grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1])
             seen = self._ruled_boxes.setdefault(prov.page_no, [])
@@ -512,15 +699,19 @@ class PdfParser:
             self._ruled[item.self_ref] = grid
 
     @staticmethod
-    def _grid_fits(grid, page: PageInfo, box: BBox, docling_rows: int) -> bool:
+    def _grid_fits(grid, page: PageInfo, box: BBox, docling_rows: int | None) -> bool:
         """괘선 격자를 믿을 수 있는가.
 
         - 행 구분선이 없는 표(머리 행 위아래에만 선)는 본문 행이 하나로 뭉친다 → 격자가 2행 이하인데
           Docling은 여러 행을 찾았으면 쓰지 않는다. 선이 있는 표에서는 Docling이 행을 더 잘게 나눠도 선을 믿는다
         - Docling 표 영역의 글자 대부분이 격자 안에 있어야 한다 (격자가 표의 일부만 덮으면 글이 빠진다)
         """
-        if grid.n_rows <= 2 and docling_rows > 3:
-            return False
+        if grid.n_rows <= 2:
+            if docling_rows is not None:
+                if docling_rows > 3:
+                    return False
+            elif _rows_without_lines(grid, page):
+                return False
         gbox = expand((grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1]), 1)
         chars = [c for c in page.chars_in(box) if c.text.strip()]
         if not chars:
@@ -528,6 +719,26 @@ class PdfParser:
         inside = sum(1 for c in chars if gbox[0] <= (c.box[0] + c.box[2]) / 2 <= gbox[2]
                      and gbox[1] <= (c.box[1] + c.box[3]) / 2 <= gbox[3])
         return inside >= 0.9 * len(chars)
+
+    def _covered_by_table(self, item, page_no: int, box: BBox, ddoc) -> bool:
+        """이 글이 표 블록 안에 이미 들어가는가.
+
+        괘선 표는 격자 안, 모델로 읽은 표는 모델이 찾은 표 영역 안의 글만 표가 담는다. Docling이 표 근처의 주석
+        ('※ …')을 표에 묶어 두는 경우가 있어, 그 밖의 글은 본문으로 남긴다.
+        """
+        if self._in_ruled_table(page_no, box):
+            return True
+        table = _table_of(item, ddoc)
+        if table is None or self.ocr:
+            return False
+        ref = table.self_ref
+        if ref in self._ruled:
+            return False  # 괘선 격자 밖의 글
+        model = self._model_tables.get(ref)
+        if model is None:
+            return True  # 표 영역을 문단으로 풀어 쓴 경우: 그 문단에 이미 들어 있다
+        mt, mdoc = model
+        return inside_ratio(box, expand(self._box(mt.prov[0], mdoc), 2)) > 0.6
 
     def _in_ruled_table(self, page_no: int, box: BBox) -> bool:
         return any(inside_ratio(box, expand(g, 1)) > 0.8 for g in self._ruled_boxes.get(page_no, []))
@@ -587,12 +798,23 @@ class PdfParser:
                 out.append(text)
         return out
 
-    def _table(self, item, page: PageInfo, box: BBox, ddoc) -> Table | None:
+    def _table(self, item, page: PageInfo, box: BBox, ddoc) -> list[Block]:
         grid = self._ruled.get(item.self_ref)
         if grid == "dup":
-            return None
+            return []  # 앞의 표와 같은 괘선 표 (Docling이 한 표를 둘로 나눈 경우)
         if grid is not None:
-            return self._ruled_table(grid, page)
+            return [self._ruled_table(grid, page)]
+        if not self.ocr:
+            model = self._model_tables.get(item.self_ref)
+            if model is None:
+                # 괘선도 없고 모델도 표를 찾지 못한 영역: 글을 잃지 않도록 문단으로 둔다
+                return [Paragraph(id=self._new_id(), prov=self._prov(page.number, box),
+                                  inlines=[Text(text=t, style=self._text_style(page, box)[0])])
+                        for t in self._cell_paragraphs(page.text_lines(box))]
+            item = model[0]
+        return [self._model_table(item, page, box)]
+
+    def _model_table(self, item, page: PageInfo, box: BBox) -> Table:
         data = item.data
         table = Table(id=self._new_id(), prov=self._prov(page.number, box), width_pt=round(box[2] - box[0], 1))
         # 표 영역 안에 선이 있으면 칸마다 테두리를 그린다

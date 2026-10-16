@@ -112,3 +112,14 @@ def test_ruled_table_structure(doc):
     assert first == [("구분", 2, 1), ("2026년", 1, 3)]
     assert ["".join(p.text for p in c.blocks) for c in t.rows[-1].cells] == ["합계", "15", "19", "34"]
     assert t.rows[2].cells[1].borders.top is not None
+
+
+def test_split_paragraph_merge_rules():
+    # 쪽·줄에서 끊긴 문단 잇기: 문장으로 끝났거나 다음 줄이 개조식 기호로 시작하면 잇지 않는다
+    from korean_parser.parsers.pdf import _SENTENCE_END
+    from korean_parser.outline import match_marker
+
+    assert _SENTENCE_END.search("비용은 별도 청구하지 아니한다.")
+    assert _SENTENCE_END.search("협상순위를 부여함")
+    assert not _SENTENCE_END.search("기준으로 지급하며 병원과")
+    assert match_marker("◦ 순찰(26코스)을 통해 시설물 점검") and not match_marker("사전에 협의하여 착용하고")
