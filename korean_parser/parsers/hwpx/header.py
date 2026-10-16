@@ -47,6 +47,21 @@ def resolve_switch(el):
     return case if case is not None else kid(sw, "default")
 
 
+_AUTO_COMMENT = re.compile(r"^\s*[^\s.]{1,10}입니다\.")
+_ORIGINAL_NAME = re.compile(r"원본 그림의 이름\s*:\s*(.+)")
+
+
+def shape_comment(el) -> str | None:
+    """개체 설명(shapeComment). 한글이 자동으로 넣는 설명('그림입니다. 원본 그림의 이름: …')은
+    원본 그림 파일 이름만 남기고, 그 밖의 자동 설명('사각형입니다.')은 버린다."""
+    c = kid(el, "shapeComment")
+    text = c.text.strip() if c is not None and c.text else ""
+    if not text or not _AUTO_COMMENT.match(text):
+        return text or None
+    m = _ORIGINAL_NAME.search(text)
+    return m.group(1).strip() if m else None
+
+
 def color(value: str | None) -> str | None:
     if value and _HEX.match(value):
         return value.upper()

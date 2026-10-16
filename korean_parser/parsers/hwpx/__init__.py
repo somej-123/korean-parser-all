@@ -21,7 +21,7 @@ from ...ir import (
     Anchor, Block, Break, Cell, Document, Drawing, Equation, Heading, ImageRef, Image, ListInfo, Meta,
     Note, NoteRef, PageBreak, PageSetup, Paragraph, Provenance, Row, Tab, Table, Text, TextStyle,
 )
-from .header import Counters, Header, color, hwp_pt, kid, kids, ln
+from .header import Counters, Header, color, hwp_pt, kid, kids, ln, shape_comment
 from ..docx.symbols import map_symbol
 from .shapes import DRAWING_TAGS, ShapeReader
 
@@ -367,8 +367,7 @@ class HwpxParser:
         w = hwp_pt(sz.get("width")) if sz is not None else 0.0
         h = hwp_pt(sz.get("height")) if sz is not None else 0.0
         inline = pos is not None and pos.get("treatAsChar") == "1"
-        comment = kid(el, "shapeComment")
-        alt = comment.text.strip() if comment is not None and comment.text else None
+        alt = shape_comment(el)
 
         if name == "chart":
             root = self._xml(el.get("chartIDRef", ""))

@@ -14,7 +14,7 @@ from __future__ import annotations
 import math
 
 from ...ir import Shape
-from .header import color, fill_color, hwp_pt, kid, kids, ln
+from .header import color, fill_color, hwp_pt, kid, kids, ln, shape_comment
 
 Matrix = tuple[float, float, float, float, float, float]  # x' = a x + b y + c, y' = d x + e y + f
 IDENTITY: Matrix = (1, 0, 0, 0, 1, 0)
@@ -153,8 +153,7 @@ class ShapeReader:
         if name in ("rect", "ellipse", "polygon", "curve") and shape.image_id is None:
             shape.image_id = _image_fill(el, self.image_id)
         shape.id = el.get("instid") or el.get("id")
-        comment = kid(el, "shapeComment")
-        shape.name = comment.text if comment is not None and comment.text else None
+        shape.name = shape_comment(el)
         draw = kid(el, "drawText")
         if draw is not None:
             sub = kid(draw, "subList")

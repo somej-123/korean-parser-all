@@ -118,6 +118,13 @@ class LlmRenderer:
             parts = (self.blocks(c.blocks) for r in t.rows for c in r.cells)
             return "\n\n".join(p for p in parts if p.strip())
 
+        # 칸 대부분이 빈 표는 표지·로고 배치용 틀이다. 내용 있는 칸만 글로 풀어 쓴다.
+        cells = [c for r in t.rows for c in r.cells]
+        filled = [c for c in cells if self._plain(c.blocks).strip()]
+        if len(cells) >= 4 and (len(filled) <= 2 or len(filled) <= len(cells) * 0.25):
+            parts = (self.blocks(c.blocks) for c in filled)
+            return "\n\n".join(p for p in parts if p.strip())
+
         complex_cells = any(
             len(c.blocks) > 1 or any(isinstance(x, (Table, Drawing)) for x in c.blocks)
             for r in t.rows for c in r.cells

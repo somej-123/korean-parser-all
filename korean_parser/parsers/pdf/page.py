@@ -16,7 +16,9 @@ from dataclasses import dataclass, field
 
 BBox = tuple[float, float, float, float]  # x0, y0(위), x1, y1(아래)
 
-_BOLD_NAME = ("bold", "black", "heavy", "semibold", "demibold", "extrabold", "gothic-b", "-b", "견고딕", "헤드라인")
+_BOLD_NAME = ("bold", "black", "heavy", "semibold", "demibold", "extrabold", "gothic-b", "-b", "견고딕", "헤드라인",
+              # 한글(HWP)이 PDF에 넣는 HY 글꼴 이름: 헤드라인M, 견고딕, 견명조
+              "h2hdrm", "h2gtre", "h2mjre", "hyheadline", "hygothic-extra", "hymyeongjo-extra")
 
 
 @dataclass
@@ -29,6 +31,7 @@ class Char:
     color: str
     font: str
     origin: tuple[float, float] = (0.0, 0.0)  # 글자 기준점 (x, 기준선 y)
+    advance: float = 0.0  # 글꼴이 말하는 글자 폭 (loose box). 폭 정보가 깨진 글꼴은 글자 크기만큼 나온다
 
 
 @dataclass
@@ -112,37 +115,47 @@ class PageInfo:
         return best
 
     def runs(self) -> list[Run]:
-        """글자를 같은 줄·같은 서식·가까운 간격 단위로 묶는다 (내용 순서 기준)."""
+        """글자를 같은 줄·같은 서식·가까운 간격 단위로 묶는다 (내용 순서 기준).
+
+        간격은 잉크 상자가 아니라 글자 기준점(origin)으로 잰다. 잉크 상자로 재면 좁은 글자('(', '.')
+        옆이 띄어 쓴 것처럼 보이고, 폭 정보가 깨진 글꼴(모든 글자 상자가 글자 크기만큼)은 글자끼리
+        겹쳐 보여 한 글자씩 쪼개진다.
+        """
+        chars = [c for c in _dedupe_overlaps(self.chars) if not _is_symbol(c.text)]  # 기호는 바탕 그림에 남김
+        right = _right_edges(chars)
         runs: list[Run] = []
-        cur: list[Char] = []
+        cur: list[int] = []
 
         def flush():
             if not cur:
                 return
-            text = "".join(c.text for c in cur)
-            if text.strip():
-                first, last = cur[0], cur[-1]
-                x0 = min(c.box[0] for c in cur)
-                x1 = max(c.box[2] for c in cur)
-                box = (x0, min(c.box[1] for c in cur), x1, max(c.box[3] for c in cur))
-                runs.append(Run(text=text.rstrip(), x=x0, baseline=first.origin[1], width=max(x1 - x0, 0.5),
-                                size=first.size, bold=first.bold, italic=first.italic, color=first.color,
-                                font=first.font, box=box))
+            while cur and chars[cur[-1]].text.isspace():
+                cur.pop()
+            if cur:
+                first = chars[cur[0]]
+                x0, x1 = first.origin[0], right[cur[-1]]
+                box = (x0, min(chars[i].box[1] for i in cur), x1, max(chars[i].box[3] for i in cur))
+                runs.append(Run(text="".join(chars[i].text for i in cur), x=x0, baseline=first.origin[1],
+                                width=max(x1 - x0, 0.5), size=first.size, bold=first.bold, italic=first.italic,
+                                color=first.color, font=first.font, box=box))
             cur.clear()
 
-        for c in _dedupe_overlaps(self.chars):
+        for i, c in enumerate(chars):
+            if c.size <= 1.5 and c.text.isspace():
+                flush()  # pdfium이 위치 간격을 보고 끼워 넣은 공백 = 단어 사이
+                continue
             if cur:
-                p = cur[-1]
+                p = chars[cur[-1]]
                 same_line = abs(c.origin[1] - p.origin[1]) < max(p.size * 0.25, 0.8)
                 same_style = (abs(c.size - p.size) < 0.6 and c.bold == p.bold and c.color == p.color)
-                gap = c.box[0] - p.box[2]
+                gap = c.origin[0] - right[cur[-1]]
                 # 공백 문자 없이 위치로만 띄운 단어 사이(간격이 글자 크기의 1/4 이상)에서도 끊어 제자리에 놓는다
                 spaced = gap > p.size * 0.25 and not (c.text.isspace() or p.text.isspace())
-                if not (same_line and same_style and -p.size * 0.5 < gap < p.size * 1.2) or spaced:
+                if not (same_line and same_style and -p.size * 0.3 < gap < p.size * 1.2) or spaced:
                     flush()
             if c.text.isspace() and not cur:
                 continue
-            cur.append(c)
+            cur.append(i)
         flush()
         return runs
 
@@ -200,6 +213,7 @@ class PdfPages:
 
         원본을 건드리지 않도록 PDF를 한 번 더 열어 그 사본에서 글자 개체를 지운다.
         양식(Form XObject) 안에 든 글자는 지울 수 없어 남는다.
+        사용자 정의 영역(PUA) 기호만 든 글자 개체(글머리 □ 등)는 브라우저 글꼴로 그릴 수 없으므로 바탕에 남긴다.
         """
         import pypdfium2 as pdfium
         import pypdfium2.raw as raw
@@ -208,9 +222,12 @@ class PdfPages:
             self._bg_pdf = pdfium.PdfDocument(self._path)
         page = self._bg_pdf[number - 1]
         try:
-            for obj in list(page.get_objects(max_depth=1)):
-                if obj.type == raw.FPDF_PAGEOBJ_TEXT:
-                    page.remove_obj(obj)
+            tp = page.get_textpage()
+            remove = [obj for obj in page.get_objects(max_depth=1)
+                      if obj.type == raw.FPDF_PAGEOBJ_TEXT and not _symbol_only(_obj_text(obj, tp))]
+            tp.close()
+            for obj in remove:
+                page.remove_obj(obj)
             page.gen_content()
             img = page.render(scale=scale).to_pil().convert("RGB")
         except Exception:  # noqa: BLE001
@@ -257,8 +274,10 @@ class PdfPages:
                 if raw.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value:
                     opaque = bool(raw.FPDFPageObj_GetFillColor(obj.raw, r, g, b, a)) and a.value >= 200
             if opaque:
-                left, bottom, right, top = obj.get_bounds()
-                occluders.append((idx, (left, h - top, right, h - bottom)))
+                vb = _visible_bounds(obj)
+                if vb is not None:
+                    left, bottom, right, top = vb
+                    occluders.append((idx, (left, h - top, right, h - bottom)))
 
         # 글자
         tp = page.get_textpage()
@@ -270,6 +289,8 @@ class PdfPages:
             if not ch or ch in "\r\n":
                 continue
             left, bottom, right, top = tp.get_charbox(i)
+            loose = raw.FS_RECTF()
+            raw.FPDFText_GetLooseCharBox(tp.raw, i, loose)
             # 실제 보이는 크기 = 글꼴 크기 × 글자 행렬의 배율 (행렬로 축소해 그리는 PDF가 많다)
             m = raw.FS_MATRIX()
             scale = 1.0
@@ -305,7 +326,7 @@ class PdfPages:
             if raw.FPDFText_GetFillColor(tp.raw, i, r, g, b, a):
                 color = f"#{r.value:02X}{g.value:02X}{b.value:02X}"
             info.chars.append(Char(ch, (left, h - top, right, h - bottom), size, bold, italic, color, fname,
-                                   (ox.value, h - oy.value)))
+                                   (ox.value, h - oy.value), max(loose.right - ox.value, 0.0)))
         tp.close()
 
         # 그래픽 개체 (이미지, 선·도형). 쪽 전체를 덮는 배경은 뺀다.
@@ -315,7 +336,10 @@ class PdfPages:
                     raw.FPDF_PAGEOBJ_SHADING: "shading"}.get(obj.type)
             if kind is None:
                 continue
-            left, bottom, right, top = obj.get_bounds()
+            vb = _visible_bounds(obj)
+            if vb is None:
+                continue
+            left, bottom, right, top = vb
             box = (left, h - top, right, h - bottom)
             if (box[2] - box[0]) * (box[3] - box[1]) > 0.9 * page_area:
                 continue
@@ -333,6 +357,94 @@ class PdfPages:
         except Exception:  # noqa: BLE001
             info._bitmap = None
         return info
+
+
+def _visible_bounds(obj) -> tuple[float, float, float, float] | None:
+    """개체 범위를 잘라내기 경로(clip path)로 좁힌 실제로 보이는 범위 (PDF 좌표: left, bottom, right, top).
+
+    그라데이션 띠처럼 긴 조각을 잘라내기 경로로 일부만 보이게 그린 PDF가 많다. 잘라내기를 무시하면
+    보이지 않는 부분이 옆의 글을 '덮는' 것으로 오판한다. 전부 잘려 보이지 않으면 None.
+    """
+    import pypdfium2.raw as raw
+
+    left, bottom, right, top = obj.get_bounds()
+    cp = raw.FPDFPageObj_GetClipPath(obj.raw)
+    if not cp:
+        return left, bottom, right, top
+    x, y = ctypes.c_float(), ctypes.c_float()
+    for pi in range(raw.FPDFClipPath_CountPaths(cp)):
+        n = raw.FPDFClipPath_CountPathSegments(cp, pi)
+        if n <= 0:
+            continue
+        xs, ys = [], []
+        for si in range(n):
+            seg = raw.FPDFClipPath_GetPathSegment(cp, pi, si)
+            if seg and raw.FPDFPathSegment_GetPoint(seg, ctypes.byref(x), ctypes.byref(y)):
+                xs.append(x.value)
+                ys.append(y.value)
+        if xs:
+            left, right = max(left, min(xs)), min(right, max(xs))
+            bottom, top = max(bottom, min(ys)), min(top, max(ys))
+    if right < left or top < bottom:
+        return None
+    return left, bottom, right, top
+
+
+def _is_symbol(ch: str) -> bool:
+    return len(ch) == 1 and 0xE000 <= ord(ch) <= 0xF8FF
+
+
+def _symbol_only(text: str) -> bool:
+    t = [ch for ch in text if not ch.isspace()]
+    return bool(t) and all(_is_symbol(ch) for ch in t)
+
+
+def _obj_text(obj, textpage) -> str:
+    import pypdfium2.raw as raw
+
+    n = raw.FPDFTextObj_GetText(obj.raw, textpage.raw, None, 0)
+    if n <= 2:
+        return ""
+    buf = ctypes.create_string_buffer(n)
+    raw.FPDFTextObj_GetText(obj.raw, textpage.raw, ctypes.cast(buf, ctypes.POINTER(raw.FPDF_WCHAR)), n)
+    return buf.raw[: n - 2].decode("utf-16-le", "ignore")
+
+
+def _right_edges(chars: list[Char]) -> list[float]:
+    """글자마다 실제로 차지하는 오른쪽 끝.
+
+    보통은 글꼴의 글자 폭(advance)을 쓰고, 다음 글자가 그보다 가까이 놓였으면 다음 글자의 시작점을 쓴다.
+    폭 정보가 깨진 글꼴(모든 글자 폭이 글자 크기만큼)은 같은 줄 이웃 글자들의 보통 간격을 폭으로 본다.
+    그래야 장평을 줄인 글에서 단어 사이 간격을 찾을 수 있다.
+    """
+    n = len(chars)
+    steps: list[float | None] = []
+    for i, c in enumerate(chars):
+        nxt = chars[i + 1] if i + 1 < n else None
+        step = None
+        if nxt is not None and abs(nxt.origin[1] - c.origin[1]) < c.size * 0.25 and abs(nxt.size - c.size) < 0.6:
+            d = nxt.origin[0] - c.origin[0]
+            if 0 < d < c.size * 1.5:
+                step = d
+        steps.append(step)
+
+    out = []
+    for i, c in enumerate(chars):
+        adv = c.advance if c.advance > 0 else c.box[2] - c.origin[0]
+        if adv >= c.size * 0.9:  # 폭 정보가 깨졌을 수 있다 → 이웃 중 같은 종류(반각/전각) 글자의 보통 간격
+            near = [steps[j] for j in range(max(0, i - 8), min(n, i + 9))
+                    if steps[j] is not None and chars[j].text.isascii() == c.text.isascii()
+                    and abs(chars[j].origin[1] - c.origin[1]) < c.size * 0.25]
+            if len(near) >= 3:
+                adv = min(adv, statistics.median(near))
+            elif c.text.isascii():
+                adv = c.size * 0.55
+        step = steps[i]
+        if step is not None and 0 < step <= adv:
+            out.append(c.origin[0] + step)  # 다음 글자가 바로 이어 놓였으면 그 간격이 실제 폭
+        else:
+            out.append(c.origin[0] + max(adv, 0.0))
+    return out
 
 
 def _dedupe_overlaps(chars: list[Char]) -> list[Char]:

@@ -11,3 +11,11 @@
 | container.hwpx | testFile/reader_writer/SimpleContainer.hwpx |
 | equation.hwpx | testFile/reader_writer/SimpleEquation.hwpx |
 | project_plan.hwpx | testFile/error/20250523/프로젝트 계획서.hwpx |
+
+## 공공누리 제1유형 (출처표시)
+
+| 파일 | 출처 |
+|---|---|
+| rfp_example.hwpx | 과학기술정보통신부·정보통신산업진흥원, 「공공SW사업 제안요청서 작성 예시」 (정책브리핑 korea.kr 보도자료 첨부, newsId=156516318) |
+
+공공누리 제1유형 저작물로, 출처를 표시하면 자유롭게 이용할 수 있습니다.

@@ -1,4 +1,4 @@
-"""HWPX 파서 테스트. 파일 출처는 tests/fixtures/hwpx/NOTICE.md (hwpxlib, Apache-2.0)."""
+"""HWPX 파서 테스트. 파일 출처는 tests/fixtures/hwpx/NOTICE.md (hwpxlib Apache-2.0, 공공누리 제1유형)."""
 
 from pathlib import Path
 
@@ -105,3 +105,22 @@ def test_all_fixtures_render():
         doc = parse(f)
         assert render_html(doc).startswith("<!doctype html>")
         render_llm(doc)
+
+
+def test_real_rfp_example():
+    """실제 공공SW사업 제안요청서 작성 예시 (과기정통부·NIPA, 공공누리 제1유형)."""
+    doc = parse(FIX / "rfp_example.hwpx")
+    text = render_llm(doc, with_ids=False)
+    # 한글이 자동으로 넣은 그림 설명은 원본 파일 이름만 남는다
+    assert "[이미지: NIPA_로고.jpg" in text
+    assert "그림입니다" not in text
+    # 칸 대부분이 빈 표지 배치용 표는 글로 풀린다
+    assert "공공SW사업 제안요청서\n\n작성 예시" in text
+    # 장 제목과 그 아래 번호가 계층대로 들여 쓰인다
+    assert "Ⅰ. 사업 개요\n\n  1. 제안개요" in text
+    # 세로 병합 표 (HW 품목 11행)
+    tables = [b for b in doc.blocks if isinstance(b, Table)]
+    assert any(c.row_span == 11 and "HW" in "".join(p.text for p in c.blocks if hasattr(p, "text"))
+               for t in tables for r in t.rows for c in r.cells)
+    html = render_html(doc)
+    assert "rowspan=\"11\"" in html
