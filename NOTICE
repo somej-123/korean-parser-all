@@ -9,3 +9,4 @@ This product includes software developed by 우정호 (woojungho)
 이 NOTICE 파일의 내용(만든 사람과 출처)을 함께 전달해야 합니다.
 
 시험용 문서 파일의 출처와 라이선스는 tests/fixtures/hwpx/NOTICE.md에 있습니다.
+이 소프트웨어가 쓰는 다른 라이브러리·모델의 출처와 라이선스는 THIRD_PARTY.md에 있습니다.
