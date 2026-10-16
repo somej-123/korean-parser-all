@@ -24,6 +24,7 @@ import datetime
 import mimetypes
 import posixpath
 import re
+from fractions import Fraction
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
@@ -38,8 +39,12 @@ S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 _CELL_REF = re.compile(r"^([A-Z]+)(\d+)$")
 # 기본 제공 날짜·시각 표시 형식 번호
 _BUILTIN_DATE = set(range(14, 23)) | {45, 46, 47}
-_BUILTIN_FMT = {1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00", 9: "0%", 10: "0.00%", 11: "0.00E+00",
-                37: "#,##0", 38: "#,##0", 39: "#,##0.00", 40: "#,##0.00"}
+_ACCOUNTING = '_-* #,##0{d}_-;-* #,##0{d}_-;_-* "-"_-;_-@_-'
+# 회계 형식(41~44)의 통화 기호는 만든 컴퓨터의 지역 설정을 따라 파일에 없다 → 기호 없이 (0은 '-')
+_BUILTIN_FMT = {1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00", 9: "0%", 10: "0.00%", 11: "0.00E+00", 12: "# ?/?",
+                13: "# ??/??", 37: "#,##0", 38: "#,##0", 39: "#,##0.00", 40: "#,##0.00",
+                41: _ACCOUNTING.format(d=""), 42: _ACCOUNTING.format(d=""), 43: _ACCOUNTING.format(d=".00"),
+                44: _ACCOUNTING.format(d=".00"), 48: "##0.0E+0"}
 C = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
 XDR = "{http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing}"
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
@@ -87,17 +92,132 @@ def format_number(value: float, code: str | None, is_date: bool, date1904: bool 
         if has_date and has_time:
             return d.strftime("%Y-%m-%d %H:%M:%S" if d.second else "%Y-%m-%d %H:%M")
         return d.strftime("%Y-%m-%d") if has_date else d.strftime("%H:%M:%S" if d.second else "%H:%M")
-    code = (code or "").split(";")[0]
-    if "%" in code:
-        decimals = len(code.split(".")[1].split("%")[0]) if "." in code else 0
-        return f"{_round(value * 100, decimals):.{decimals}f}%"
-    if re.search(r"[0#]", code):
-        decimals = len(re.sub(r"[^0#]", "", code.split(".")[1])) if "." in code else 0
-        rounded = _round(value, decimals)
-        return f"{rounded:,.{decimals}f}" if "," in code else f"{rounded:.{decimals}f}"
+    sections = _sections(code or "")
+    if value < 0 and len(sections) > 1:
+        section, value = sections[1], -value  # 음수 부분이 있으면 부호는 그 부분이 정한다 ('(#,##0)', '-#,##0')
+    elif value == 0 and len(sections) > 2:
+        section = sections[2]  # 0 부분 (회계 형식의 '-')
+    else:
+        section = sections[0]
+    prefix, pattern, suffix = _split_section(section)
+    if not pattern:  # 숫자 자리가 없는 부분: 글자만 ('-', '없음'). 글 자리('@')만 있으면 숫자를 그대로
+        if (prefix or suffix or section.strip()) and "@" not in section:
+            return (prefix + suffix).strip()
+        return _general(value)
+    if "%" in section:
+        value *= 100
+    return (prefix + _format_pattern(value, pattern) + suffix).strip()
+
+
+def _general(value: float) -> str:
     if float(value).is_integer() and abs(value) < 1e15:
         return str(int(value))
     return f"{value:.15g}"
+
+
+def _sections(code: str) -> list[str]:
+    """';'로 나눈 부분들 (따옴표·역슬래시 안의 ';'는 글자)."""
+    out, cur, quoted, i = [], "", False, 0
+    while i < len(code):
+        ch = code[i]
+        if ch == '"':
+            quoted = not quoted
+        elif ch == "\\" and i + 1 < len(code):
+            cur += code[i:i + 2]
+            i += 2
+            continue
+        elif ch == ";" and not quoted:
+            out.append(cur)
+            cur = ""
+            i += 1
+            continue
+        cur += ch
+        i += 1
+    return out + [cur]
+
+
+_PATTERN_CHARS = set("0#?,.%/E+-")
+
+
+def _split_section(section: str) -> tuple[str, str, str]:
+    """한 부분 → (앞 글자, 숫자 자리 모양, 뒤 글자).
+
+    따옴표 글('"원"'), 역슬래시 글자('\\원'), 통화 표시('[$₩-412]' → '₩'), 그 밖의 글자(₩ $ 원 ( ))는 글자로,
+    색·조건('[Red]', '[>=100]'), 채우기('*-'), 맞춤 빈칸('_)')은 뺀다.
+    """
+    before, pattern, after = "", "", ""
+    i = 0
+    while i < len(section):
+        ch = section[i]
+        lit = None
+        if ch == '"':
+            j = section.find('"', i + 1)
+            j = len(section) if j < 0 else j
+            lit, i = section[i + 1:j], j + 1
+        elif ch == "\\" and i + 1 < len(section):
+            lit, i = section[i + 1], i + 2
+        elif ch == "[":
+            j = section.find("]", i)
+            j = len(section) if j < 0 else j
+            body = section[i + 1:j]
+            lit, i = (body[1:].split("-")[0] if body.startswith("$") else ""), j + 1
+        elif ch in "_*":
+            lit, i = "", i + 2
+        elif ch in "0#?" or (pattern and not after and (ch in _PATTERN_CHARS or ch.isdigit() and "/" in pattern)):
+            pattern += ch
+            i += 1
+            continue
+        elif ch == "@":
+            lit, i = "", i + 1
+        elif ch == " " and pattern and not after and "/" in section[i:]:
+            pattern += ch  # 분수의 '정수 부분 빈칸 분자/분모' ('# ?/?')
+            i += 1
+            continue
+        else:
+            lit, i = ch, i + 1
+        if pattern:
+            after += lit
+        else:
+            before += lit
+    # 'E+' 뒤의 숫자 자리, '%'는 모양에 남기고 앞뒤 글자에서 '%'는 뺀다 (값에 100을 곱하고 뒤에 붙인다)
+    pct = "%" if "%" in before + pattern + after else ""
+    before, after = before.replace("%", ""), after.replace("%", "")
+    pattern = pattern.replace("%", "")
+    return before, pattern, pct + after if pattern else after
+
+
+def _format_pattern(value: float, pattern: str) -> str:
+    """숫자 자리 모양(0 # ? , . E+ /)으로 숫자를 쓴다."""
+    if "E" in pattern.upper():
+        mant, _, exp = pattern.upper().partition("E")
+        decimals = len(re.sub(r"[^0#?]", "", mant.split(".")[1])) if "." in mant else 0
+        digits = max(len(re.sub(r"[^0]", "", exp)), 1)
+        m, e = f"{value:.{decimals}E}".split("E")
+        return f"{m}E{'-' if int(e) < 0 else '+'}{abs(int(e)):0{digits}d}"
+    if "/" in pattern:  # 분수 '# ?/?', '# ??/??', '?/8'
+        whole_part, _, den = pattern.rpartition("/")
+        num_part = whole_part.split()[-1] if whole_part.split() else whole_part
+        has_whole = len(whole_part.split()) > 1
+        sign, v = ("-" if value < 0 else ""), abs(value)
+        whole = int(v) if has_whole else 0
+        if den.isdigit():  # 고정 분모('?/8'): 분자를 반올림하고 약분하지 않는다 (0.3 → 2/8)
+            frac = Fraction(int(_round((v - whole) * int(den), 0)), 1)
+            if frac.numerator == int(den):
+                return sign + (str(whole + 1) if has_whole else f"{den}/{den}")
+            text = f"{frac.numerator}/{den}" if frac.numerator else ""
+            return sign + ((f"{whole} {text}".strip() if whole else (text or "0")) if has_whole else (text or "0"))
+        frac = Fraction(v - whole).limit_denominator(10 ** max(len(den), 1) - 1)  # 분모 자리 수('??' → 99까지)
+        if frac.numerator == frac.denominator:
+            whole, frac = whole + 1, Fraction(0)
+        text = f"{frac.numerator}/{frac.denominator}" if frac else ""
+        if has_whole:
+            return sign + (f"{whole} {text}".strip() if whole else (text or "0"))
+        return sign + (text or "0") if num_part else sign + text
+    scale = 1000 ** (len(pattern) - len(pattern.rstrip(",")))  # 끝의 ','마다 천으로 나눈다
+    body = pattern.rstrip(",")
+    decimals = len(re.sub(r"[^0#?]", "", body.split(".")[1])) if "." in body else 0
+    rounded = _round(value / scale, decimals)
+    return f"{rounded:,.{decimals}f}" if "," in body else f"{rounded:.{decimals}f}"
 
 
 class XlsxParser:
