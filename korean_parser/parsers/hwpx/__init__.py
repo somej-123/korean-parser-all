@@ -40,6 +40,32 @@ def parse_hwpx(path: str | Path) -> Document:
     return HwpxParser(path).parse()
 
 
+class _Slot(list):
+    """문단 앞·뒤에 놓을 블록 목록. 넣을 때 문단 글의 어디(인라인 몇 개 뒤)였는지도 기억한다 (`at`)."""
+
+    def __init__(self, inlines: list):
+        super().__init__()
+        self.inlines, self.at = inlines, []
+
+    def append(self, b) -> None:
+        super().append(b)
+        self.at.append(len(self.inlines))
+
+
+def _strip_ends(inlines: list) -> list:
+    """맨 앞 글의 앞 공백과 맨 뒤 글의 뒤 공백을 지운다."""
+    out = list(inlines)
+    if out and isinstance(out[0], Text):
+        out[0] = out[0].model_copy(update={"text": out[0].text.lstrip()})
+    if out and isinstance(out[-1], Text):
+        out[-1] = out[-1].model_copy(update={"text": out[-1].text.rstrip()})
+    return [i for i in out if not (isinstance(i, Text) and not i.text)]
+
+
+def _has_text(inlines) -> bool:
+    return any(isinstance(i, Text) and i.text.strip() for i in inlines)
+
+
 class HwpxParser:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -139,8 +165,8 @@ class HwpxParser:
 
         state = {"link": None, "deleted": False, "highlight": None}
         inlines: list = []
-        after: list[Block] = []  # 문단 뒤에 놓을 표·도식
-        before: list[Block] = []  # 문단 앞에 놓을 떠 있는 개체
+        after = _Slot(inlines)  # 문단 뒤에 놓을 표·도식
+        before = _Slot(inlines)  # 문단 앞에 놓을 떠 있는 개체
         for run in p:
             if ln(run) == "run":
                 self._run(run, inlines, before, after, state)
@@ -148,11 +174,34 @@ class HwpxParser:
         blocks: list[Block] = []
         if p.get("pageBreak") == "1" or (pdef is not None and pdef.page_break_before):
             blocks.append(PageBreak(id=self._new_id()))
-        blocks.extend(before)
 
         list_info, heading_level = None, None
         if pdef is not None and pdef.heading_type != "NONE":
             list_info, heading_level = self._numbering(pdef)
+
+        # 글 가운데에 놓인 개체(앞뒤 모두 글이 있는 글상자·표)는 그 자리에서 문단을 나눈다. 한컴 미리보기처럼
+        # 놓인 자리에서 읽힌다 ('앞 글' 문단, 개체, '뒤 글' 문단). 나누지 않으면 문단 앞뒤로 밀려 읽는 순서가 달라졌다
+        # (hwpxlib RectInPara 미리보기 재현율 0.78). 제목 문단은 나누지 않는다
+        mid = [] if heading_level is not None else sorted(
+            ((at, i, b) for slot in (before, after) for i, (b, at) in enumerate(zip(slot, slot.at))
+             if _has_text(inlines[:at]) and _has_text(inlines[at:])), key=lambda x: (x[0], x[1]))
+        if mid:
+            style = pdef.style if pdef else None
+            name = style_def.name if style_def else None
+            used = {id(b) for _, _, b in mid}
+            blocks.extend(b for b in before if id(b) not in used)
+            start = 0
+            for k, (at, _, b) in enumerate(mid + [(len(inlines), 0, None)]):
+                part = _strip_ends(_merge(inlines[start:at]))  # 나눈 자리 앞뒤의 공백은 문단 경계로 사라진다
+                if _has_text(part):
+                    blocks.append(Paragraph(id=self._new_id(), prov=self._prov(), inlines=part, style=style,
+                                            style_name=name, list_info=list_info if k == 0 else None))
+                if b is not None:
+                    blocks.append(b)
+                start = at
+            blocks.extend(b for b in after if id(b) not in used)
+            return blocks
+        blocks.extend(before)
 
         inlines = _merge(inlines)
         has_text = any(isinstance(i, Text) and i.text.strip() for i in inlines)

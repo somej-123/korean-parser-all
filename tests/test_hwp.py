@@ -326,3 +326,16 @@ def test_compose_and_dutmal_text_comes_from_controls():
     doc = HwpParser("compose.hwp", file=FakeFile(data)).parse()
     texts = [b.text for b in doc.blocks if isinstance(b, Paragraph)]
     assert "□ 있음 □√없음" in texts and "大韓民國(대한민국) 만세" in texts
+
+
+def test_object_between_text_splits_paragraph():
+    # 글 가운데 놓인 글상자는 그 자리에서 문단을 나눈다 ('앞 글' 문단, 도식, '뒤 글' 문단). 한컴 미리보기처럼 놓인
+    # 자리에서 읽힌다. 문단 앞으로 밀면 hwpxlib RectInPara의 미리보기 재현율이 0.78이었다. 한쪽에만 글이 있으면 그대로
+    obj = gso(1, 7, 10000, 5000) + rec(Tag.SHAPE_COMPONENT, 2, component("$rec", 10000, 5000, instid=8))
+    obj += text_box(3, "상자 안 글") + rect_points(3, 10000, 5000)
+    data = para(0, "앞 글 " + ctrl(11, "gso ") + "뒤 글", extra=obj)
+    data += para(0, ctrl(11, "gso ") + "글상자 뒤에만 글", extra=obj)
+    doc = HwpParser("mid.hwp", file=FakeFile(data)).parse()
+    kinds = [(type(b).__name__, getattr(b, "text", "")) for b in doc.blocks]
+    assert kinds == [("Paragraph", "앞 글"), ("Drawing", ""), ("Paragraph", "뒤 글"),
+                     ("Paragraph", "글상자 뒤에만 글"), ("Drawing", "")]

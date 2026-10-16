@@ -65,7 +65,7 @@ ARCHITECTURE의 'OCR 띄어쓰기'). OCR이 빠뜨린 ○ □ 기호도 모양�
 
 - (v0.9 완료) DOCX·HWPX·HWP에서 '굵고 큰 번호 문단'으로 쓴 제목: 사용자와 정한 대로 문단은 그대로 두고
   `Paragraph.heading_guess`(추정 단계, 근거)만 붙인다 (IR 1.2). `evaluate.py --heading-guess`로 추정 포함 점수를 따로 본다.
-- HWPX: 문단 중간에 놓인 글상자 글이 문단 앞에 나온다 (미리보기와 순서 차이).
+- (v0.13.1 완료) HWPX: 문단 중간에 놓인 글상자는 그 자리에서 문단을 나눈다 (사용자와 정함). 미리보기 재현율 평균 0.978 → 0.998.
 - (완료) PDF 표의 점선·파선·선 굵기 (`rules.line_style`). 남은 것: 굵은 글꼴 정보가 없는 PDF의 머리 행 굵게.
 - (v0.10.1 완료) 스캔 PDF 제목 단계: 번호 종류 순서로 (0.572 → 1.000).
 - (v0.12.1) 저장소 안의 실제 문서로 DOCX·HWPX·스캔 PDF를 점검했다. `benchmarks/docling-cpu/samples/사업계획서_스캔.pdf`는
