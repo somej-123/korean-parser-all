@@ -56,3 +56,16 @@ def test_page_order_and_table_continuation_helpers():
     assert not _same_table(a, blk(4, (84, 72, 517, 120), [80, 136, 108, 108]))
     assert not _same_table(a, blk(5, (84, 72, 517, 120), [108, 108, 108, 108]))
     assert Row  # noqa: B018
+
+
+def test_ink_box_keeps_wide_letter_together():
+    # 실제 제안요청서 그림 설명의 '(MVP)' (8pt). 글꼴 폭이 깨져 'M'의 폭을 이웃 간격(약 4.8pt)으로 줄이면 잉크 끝(240.5)보다
+    # 짧아져 'M VP'로 띄어졌다. 상자가 글꼴 폭과 다르면(실제 잉크) 잉크 끝까지를 글자로 본다
+    def c(t, box, x, adv):
+        return Char(t, box, 8.0, False, False, "#000000", "", (x, 646.0), adv)
+
+    chars = [c("트", (223.16, 640.37, 231.66, 646.26), 222.96, 9.15), c("(", (229.96, 639.69, 234.68, 647.49), 229.92, 4.76),
+             c("M", (232.99, 640.4, 240.53, 646.49), 232.32, 9.15), c("V", (239.22, 640.4, 246.16, 646.49), 239.28, 7.13),
+             c("P", (245.0, 640.4, 250.89, 646.49), 244.32, 7.04), c(")", (248.69, 639.69, 253.4, 647.49), 249.12, 4.63)]
+    page = PageInfo(number=1, width=600, height=800, chars=chars)
+    assert page.text_lines((200, 630, 300, 650)) == ["트(MVP)"]

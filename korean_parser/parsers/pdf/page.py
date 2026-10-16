@@ -520,9 +520,15 @@ def _right_edges(chars: list[Char]) -> list[float]:
                 adv = c.size * 0.55
         step = steps[i]
         if step is not None and 0 < step <= adv:
-            out.append(c.origin[0] + step)  # 다음 글자가 바로 이어 놓였으면 그 간격이 실제 폭
+            edge = c.origin[0] + step  # 다음 글자가 바로 이어 놓였으면 그 간격이 실제 폭
         else:
-            out.append(c.origin[0] + max(adv, 0.0))
+            edge = c.origin[0] + max(adv, 0.0)
+        # 짐작한 폭이 글자의 실제 잉크보다 좁으면 잉크 끝까지 (이웃 간격으로 줄인 'M'이 잉크보다 짧아
+        # 'MVP'가 'M VP'로 띄어졌다). 상자가 글꼴 폭을 그대로 옮긴 것(깨진 글꼴은 상자도 글자 크기만큼)이면 잉크가 아니므로 쓰지 않는다
+        ink = c.box[2] - c.box[0]
+        if c.text.strip() and 0 < ink <= c.size * 1.2 and abs(ink - c.advance) > 0.5:
+            edge = max(edge, c.box[2] - 0.3)
+        out.append(edge)
     return out
 
 
