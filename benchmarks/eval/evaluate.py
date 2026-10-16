@@ -32,11 +32,17 @@ from korean_parser.ir import Heading, Paragraph, Table  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def from_ir(doc) -> list[dict]:
-    """korean-parser 결과를 평가용 블록으로. 본문 최상위 블록만 (머리말·꼬리말 제외)."""
+def from_ir(doc, guess: bool = False) -> list[dict]:
+    """korean-parser 결과를 평가용 블록으로. 본문 최상위 블록만 (머리말·꼬리말 제외).
+
+    guess=True면 추정 제목(Paragraph.heading_guess)도 그 단계의 제목으로 센다.
+    """
     out = []
     for b in doc.blocks:
-        if isinstance(b, Heading):
+        if guess and isinstance(b, Paragraph) and b.heading_guess is not None:
+            marker = f"{b.list_info.marker} " if b.list_info else ""
+            out.append({"type": "heading", "level": b.heading_guess.level, "text": marker + b.text})
+        elif isinstance(b, Heading):
             marker = f"{b.list_info.marker} " if b.list_info else ""
             out.append({"type": "heading", "level": b.level, "text": marker + b.text})
         elif isinstance(b, Paragraph):
@@ -141,7 +147,7 @@ def truth_for(spec: dict, path: Path) -> list[dict]:
 FORMATS = [("docx", ".docx"), ("pdf", ".pdf"), ("scan", ".scan.pdf")]
 
 
-def run(data: Path, baseline: bool, formats: set[str] | None = None) -> dict:
+def run(data: Path, baseline: bool, formats: set[str] | None = None, guess: bool = False) -> dict:
     from korean_parser.parsers import parse
 
     results: dict[str, list[dict]] = {}
@@ -154,9 +160,13 @@ def run(data: Path, baseline: bool, formats: set[str] | None = None) -> dict:
                 continue
             truth = truth_for(spec, path)
             t0 = time.perf_counter()
-            pred = from_ir(parse(path))
+            doc = parse(path)
+            pred = from_ir(doc)
             score = evaluate(truth, pred) | {"seconds": time.perf_counter() - t0, "doc": stem}
             results.setdefault(f"korean-parser · {fmt}", []).append(score)
+            if guess:
+                results.setdefault(f"korean-parser · {fmt} (추정 제목 포함)", []).append(
+                    evaluate(truth, from_ir(doc, guess=True)) | {"seconds": score["seconds"], "doc": stem})
             print(f"{stem} {fmt:5s} CER {score['cer']:.3f}  어절F1 {score['eojeol_f1']:.3f}  "
                   f"TEDS {score.get('table_teds', float('nan')):.3f}", flush=True)
             if baseline and fmt != "docx":
@@ -245,11 +255,13 @@ def main() -> int:
     p.add_argument("--baseline", action="store_true", help="Docling 기본 출력도 평가")
     p.add_argument("--hwpx", help="HWPX 미리보기 비교에 쓸 폴더")
     p.add_argument("--formats", help="평가할 형식만 (쉼표로 구분: docx,pdf,scan)")
+    p.add_argument("--heading-guess", action="store_true",
+                   help="추정 제목(heading_guess)을 제목으로 센 결과도 따로 낸다")
     p.add_argument("--out", default="report.md")
     p.add_argument("--json", help="문서별 점수를 JSON으로도 저장")
     args = p.parse_args()
     formats = set(args.formats.split(",")) if args.formats else None
-    results = run(Path(args.data), args.baseline, formats) if args.data else {}
+    results = run(Path(args.data), args.baseline, formats, args.heading_guess) if args.data else {}
     hwpx = hwpx_preview(Path(args.hwpx)) if args.hwpx else []
     Path(args.out).write_text(report(results, hwpx), encoding="utf-8")
     if args.json:

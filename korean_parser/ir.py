@@ -19,7 +19,7 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 
-IR_VERSION = "1.1"
+IR_VERSION = "1.2"  # 1.2: Paragraph.heading_guess
 
 
 class _Model(BaseModel):
@@ -152,6 +152,17 @@ class OutlineInfo(_Model):
     kind: str
 
 
+class HeadingGuess(_Model):
+    """제목처럼 쓰인 번호 문단의 추정 (원본에 제목 정보는 없음. heading_guess.py가 채움).
+
+    level: 바로 앞 Heading 단계 + 개조식 단계로 정한 제목 단계 (1~6)
+    reason: 판단 근거 ("번호 'Ⅰ.' + 굵게 + 18pt (본문 11pt)")
+    """
+
+    level: int
+    reason: str
+
+
 class _Block(_Model):
     id: str = ""
     prov: Provenance | None = None
@@ -164,6 +175,7 @@ class Paragraph(_Block):
     style_name: str | None = None
     list_info: ListInfo | None = None
     outline: OutlineInfo | None = None
+    heading_guess: HeadingGuess | None = None  # 제목처럼 쓰인 번호 문단 (추정). 문단은 Paragraph 그대로 둔다
 
     @property
     def text(self) -> str:

@@ -21,14 +21,13 @@ from __future__ import annotations
 
 import math
 import re
-import statistics
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field, computed_field
 
-from .ir import Block, Document, Drawing, Heading, NoteRef, PageBreak, Paragraph, Table, Text, _walk
-from .outline import match_marker
+from .ir import Block, Document, Heading, NoteRef, PageBreak, Paragraph, Table, _walk
+from .heading_guess import TitleFinder, stream, title_text
 from .render.llm import LlmRenderer
 
 TokenCounter = Callable[[str], int]
@@ -121,8 +120,6 @@ class _Unit:
 
 
 _SENTENCE_END = re.compile(r"(?<=[.?!。])\s+")
-_TOC_LINE = re.compile(r"(\t|\.{3,}|·{3,}|…|-{3,})\s*[\d#ivxIVX\-~ ]*\s*$")  # 목차 줄: "Ⅰ. 개요 ···· 3"
-_TITLE_TAIL = re.compile(r"([.。:;,]|[다음함임됨]\.?)$")  # 문장으로 끝나는 문단은 제목이 아니다
 
 
 class _Chunker:
@@ -134,7 +131,7 @@ class _Chunker:
         self.count = count
         self.include_notes = include_notes
         self.llm = LlmRenderer(doc, with_ids=False)
-        self.body_size = _body_size(doc)
+        self.titles = TitleFinder(doc)
         self.meta = {k: v for k, v in doc.meta.model_dump().items() if v is not None}
 
     # -- 블록 → 단위 --------------------------------------------------------
@@ -143,25 +140,22 @@ class _Chunker:
         out: list[_Unit] = []
         stack: list[tuple[tuple[int, int], str]] = []  # (단계, 제목)
         heading_level = 0
-        self.kind_level: dict[str, int] = {}  # 본문 개조식에서 본 표지 종류 → 단계 (상자 안 제목에 쓴다)
         for b in self._stream(self.doc.blocks):
             if isinstance(b, PageBreak):
                 continue
             title_rank = None
             if isinstance(b, Heading):
                 heading_level = b.level
-                self.kind_level.clear()
+                self.titles.heading(b)
                 title_rank = (b.level, -1)
             elif isinstance(b, Paragraph):
-                if b.outline is not None:
-                    self.kind_level.setdefault(b.outline.kind, b.outline.level)
-                lvl = self._title_level(b)
-                if lvl is not None:
-                    title_rank = (heading_level, lvl)
+                found = self.titles.paragraph(b)  # 제목처럼 쓰인 번호 문단 (heading_guess와 같은 판단)
+                if found is not None:
+                    title_rank = (heading_level, found[0])  # (개조식 단계, 근거, 표지 종류)
             if title_rank is not None:
                 while stack and stack[-1][0] >= title_rank:
                     stack.pop()
-                stack.append((title_rank, _title_text(b)))
+                stack.append((title_rank, title_text(b)))
 
             path = tuple(t for _, t in stack)
             for text, part in self._render(b):
@@ -180,16 +174,7 @@ class _Chunker:
         return self.count(f"[^{note.label}]: {self.llm._plain(note.blocks)}") if note else 0
 
     def _stream(self, blocks):
-        """본문 블록 흐름. 글로 풀어 쓰는 표(제목 상자, 배치용 틀)와 글상자 하나뿐인 그리기 개체는
-        안쪽 블록을 본문처럼 꺼낸다."""
-        for b in blocks:
-            if isinstance(b, Table) and (flat := self.llm.flattened_cells(b)) is not None:
-                for c in flat:
-                    yield from self._stream(c.blocks)
-            elif isinstance(b, Drawing) and (frame := self.llm.text_frame_blocks(b)) is not None:
-                yield from self._stream(frame)
-            else:
-                yield b
+        return stream(blocks, self.llm)
 
     def _render(self, b: Block) -> list[tuple[str, str | None]]:
         """블록 하나의 글. 상한을 넘는 표와 문단만 여러 조각으로 나눈다."""
@@ -271,32 +256,6 @@ class _Chunker:
             out.append(indent + cur)
         return out
 
-    def _title_level(self, p: Paragraph) -> int | None:
-        """제목처럼 쓰인 번호 문단이면 그 단계, 아니면 None.
-
-        번호·기호로 시작하고, 짧고, 문장으로 끝나지 않고, 본문보다 굵거나 큰 글씨인 문단.
-        """
-        body = _title_text(p)
-        m = match_marker(body)
-        if p.outline is not None:
-            level = p.outline.level
-        elif p.list_info is not None:
-            level = p.list_info.level
-        elif m and m[0] in self.kind_level:  # 제목 상자(한 칸 표) 안의 "Ⅱ. 시스템 현황" 등
-            level = self.kind_level[m[0]]
-        else:
-            return None
-        if _TOC_LINE.search(p.text):
-            return None
-        rest = m[2] if m else body
-        if not (2 <= len(rest) <= 40) or _TITLE_TAIL.search(rest):
-            return None
-        styles = [i.style for i in p.inlines if isinstance(i, Text) and i.text.strip()]
-        bold = any(s is not None and s.bold for s in styles)
-        sizes = [s.size_pt for s in styles if s is not None and s.size_pt]
-        bigger = bool(sizes and self.body_size and max(sizes) >= self.body_size * 1.1)
-        return level if (bold or bigger) else None
-
     # -- 단위 → 조각 --------------------------------------------------------
 
     def run(self) -> list[Chunk]:
@@ -373,11 +332,6 @@ class _TableGrid:
         return self.t.model_copy(update={"rows": rows})
 
 
-def _title_text(b) -> str:
-    marker = f"{b.list_info.marker} " if getattr(b, "list_info", None) else ""
-    return " ".join((marker + b.text).split())
-
-
 def _note_ids(b: Block) -> list[str]:
     out = []
     for x in _walk([b]):
@@ -399,19 +353,6 @@ def _common_prefix(paths: list[tuple[str, ...]]) -> tuple[str, ...]:
                 n = i
                 break
     return first[:n]
-
-
-def _body_size(doc: Document) -> float | None:
-    """본문 글자 크기 (최상위 문단 글자 크기의 중앙값, 글자 수 가중)."""
-    sizes = []
-    for b in doc.blocks:
-        if isinstance(b, Paragraph):
-            for i in b.inlines:
-                if isinstance(i, Text) and i.style is not None and i.style.size_pt:
-                    sizes += [i.style.size_pt] * min(len(i.text.strip()), 200)
-    if sizes:
-        return statistics.median(sizes)
-    return doc.default_text_style.size_pt
 
 
 __all__ = ["Chunk", "ChunkSource", "chunk", "estimate_tokens"]

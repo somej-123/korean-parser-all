@@ -29,6 +29,9 @@ korean-parser-all은 **문서 파서(엔진)**다. 원문에 있는 것을 빠�
 - 띄어쓰기 교정은 원문 텍스트를 믿을 수 없는 PDF·OCR에서만 켠다. DOCX·HWPX는 원문 그대로 둔다.
 - 그림 설명을 AI로 만드는 기능은 넣지 않는다. 그림 안의 글자는 원문(PDF 텍스트 레이어, OCR)에서 읽은 것만 `inner_text`로 둔다.
 - 한글이 자동으로 넣는 개체 설명처럼 원문에 있지만 의미 없는 값은 정리하되, 새 내용을 만들지는 않는다.
+- 원문에 없는 해석이 쓸모 있을 때는 원본 구조를 바꾸지 않고 '추정'으로 표시해 따로 붙인다. 예: 굵고 큰 번호 문단으로 쓴
+  제목은 `Heading`으로 바꾸지 않고 `Paragraph.heading_guess`(추정 단계, 판단 근거)만 붙인다 (`heading_guess.py`, v0.9).
+  쓰는 쪽이 쓸지 말지 고른다.
 
 ### 청크 도구가 여기 있는 이유
 
@@ -39,7 +42,7 @@ korean-parser-all은 **문서 파서(엔진)**다. 원문에 있는 것을 빠�
 
 | 약속 | 내용 | 확인 |
 |---|---|---|
-| 형식 버전 | `Document.schema_version` (`ir.IR_VERSION`, 현재 1.1). 필드 추가는 두 번째 자리, 이름·의미 변경은 첫 자리를 올린다 | `tests/test_contract.py` |
+| 형식 버전 | `Document.schema_version` (`ir.IR_VERSION`, 현재 1.2). 필드 추가는 두 번째 자리, 이름·의미 변경은 첫 자리를 올린다 | `tests/test_contract.py` |
 | 결정성 | 같은 파일을 넣으면 블록 id·좌표까지 같은 결과 | `tests/test_contract.py`, `tests/test_pdf.py` |
 | JSON 왕복 | `Document.model_validate_json(doc.model_dump_json()) == doc` | `tests/test_contract.py` |
 | 블록 id | 문서 안에서 유일. HTML `data-kp-id`, LLM 텍스트 `<!-- b12 -->`, 조각의 `block_ids`가 같은 값 | `tests/test_contract.py` |

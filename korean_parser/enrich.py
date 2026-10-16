@@ -26,6 +26,9 @@ def enrich_korean(doc: Document, outline: bool = True) -> Document:
 
     if outline:
         _annotate_outline(doc.blocks)
+        from .heading_guess import annotate_heading_guesses
+
+        annotate_heading_guesses(doc)  # 개조식 계층을 쓰므로 그 뒤에
     return doc
 
 
