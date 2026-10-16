@@ -89,3 +89,12 @@ def test_llm_text(doc):
 def test_same_file_same_result(doc):
     # 레이아웃 모델을 써도 결과(블록 id, 좌표 포함)는 매번 같아야 한다
     assert parse(PDF).model_dump_json() == doc.model_dump_json()
+
+
+def test_text_and_spacing_from_text_layer(doc):
+    # Docling 글은 공백이 빠지지만, 텍스트 레이어에서 다시 읽으면 원문(DOCX)과 같은 띄어쓰기가 된다
+    texts = [b.text for b in doc.iter_blocks() if isinstance(b, (Paragraph, Heading))]
+    assert "2026년 문서 파싱 고도화 계획" in texts  # 숫자-한글 사이 자동 간격은 붙인다
+    assert any("스캔 문서 OCR이 전체 처리 시간" in t for t in texts)
+    assert any("병합 셀이 Markdown 변환 과정에서 사라짐" in t for t in texts)
+    assert any(t.endswith("돌아갑니다.") for t in texts)  # 마침표 앞 조판 공백 제거

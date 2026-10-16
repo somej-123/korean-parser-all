@@ -12,6 +12,7 @@ Docling은 선택 설치다: pip install "korean-parser[pdf]"
 from __future__ import annotations
 
 import base64
+import difflib
 import os
 import re
 import statistics
@@ -21,7 +22,8 @@ from ...ir import (
     Block, Border, Borders, Cell, Document, Figure, FixedPage, Heading, Image, Meta, PageBreak,
     PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Table, Text, TextRun, TextStyle,
 )
-from .page import BBox, PageInfo, PdfPages, cluster, expand, inside_ratio
+from ...normalize import is_hangul_syllable
+from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, inside_ratio
 
 PARSER_NAME = "pdf-docling"
 _CAPTION = re.compile(r"^[\[<(]?\s*(그림|표|도표|사진|Figure|Fig\.?|Table)\s*[\d IVX]+", re.I)
@@ -65,6 +67,9 @@ def parse_pdf(path: str | Path, ocr: bool | None = None, ocr_lang: str = "korean
     return PdfParser(path, ocr=ocr, ocr_lang=ocr_lang, fixed_layout=fixed_layout).parse()
 
 
+_SPACE_BEFORE_PUNCT = re.compile(r"(?<=[가-힣]) +(?=[.,](?:\s|$))")
+
+
 class PdfParser:
     def __init__(self, path, ocr: bool | None = None, ocr_lang: str = "korean", fixed_layout: bool = True):
         self.fixed_layout = fixed_layout
@@ -95,7 +100,10 @@ class PdfParser:
         ddoc = result.document
 
         self.fixer = SpacingFixer()
-        report = postprocess_docling(ddoc, fixer=self.fixer)  # 정규화 + 띄어쓰기 복원 (Docling 텍스트)
+        # 텍스트 레이어가 있으면 글은 그 레이어에서 다시 읽는다 (Docling 글은 공백이 자주 빠진다).
+        # 다시 읽지 못한 글(OCR, 영역이 어긋난 글)만 형태소 분석으로 띄어쓰기를 복원한다.
+        keep = set() if self.ocr else self._restore_text_layer(ddoc)
+        report = postprocess_docling(ddoc, fixer=self.fixer, keep_spacing=keep)
         self.spacing_reset = report.spacing_reset
         if self.ocr:
             self.doc.warnings.append("텍스트 레이어가 없어 OCR로 읽었습니다. 글자 서식은 복원되지 않습니다.")
@@ -172,6 +180,90 @@ class PdfParser:
             ps.margin_top_pt = max(min(c[1] for c in self._content.values()) - 6, 24)
             ps.margin_bottom_pt = 36
         self.doc.page = ps
+
+    def _restore_text_layer(self, ddoc) -> set[int]:
+        """Docling 글 항목과 표 칸의 글을 PDF 텍스트 레이어에서 다시 읽는다. 다시 읽은 항목의 id() 모음."""
+        keep: set[int] = set()
+        for item in ddoc.texts:
+            if len(item.prov) != 1:
+                continue
+            prov = item.prov[0]
+            text = self._layer_text(self.pages.page(prov.page_no), self._box(prov, ddoc), item.text)
+            if text is not None:
+                item.text = text
+                keep.add(id(item))
+        for table in ddoc.tables:
+            if len(table.prov) != 1:
+                continue
+            page = self.pages.page(table.prov[0].page_no)
+            for cell in table.data.table_cells:
+                if cell.bbox is None:
+                    continue
+                b = cell.bbox if cell.bbox.coord_origin.value == "TOPLEFT" else cell.bbox.to_top_left_origin(
+                    page_height=page.height)
+                text = self._layer_text(page, (b.l, b.t, b.r, b.b), cell.text)
+                if text is not None:
+                    cell.text = text
+                    keep.add(id(cell))
+        return keep
+
+    def _layer_text(self, page: PageInfo, box: BBox, original: str) -> str | None:
+        """영역 안 텍스트 레이어 글. Docling 글과 (공백을 빼고) 같은 내용일 때만 쓴다."""
+        lines = page.text_lines(box)
+        if not lines:
+            return None
+        text = self._resolve_gaps(self._join_lines(lines))
+        # 한글 뒤 마침표·쉼표 앞의 공백은 조판 과정에서 생긴 것이다 ("돌아갑니다 ."). ':' 앞은 일부러 띄우므로 둔다
+        text = _SPACE_BEFORE_PUNCT.sub("", text)
+        a, b = "".join(original.split()), "".join(text.split())
+        if not a or not b:
+            return None
+        if a == b or a in b or difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.9:
+            return text
+        return None
+
+    def _join_lines(self, lines: list[str]) -> str:
+        """한 문단의 줄을 합친다. 줄 끝에 공백 글자가 있으면 어절 경계, 한글-한글로 끊긴 자리는 형태소 분석으로 정한다."""
+        out = lines[0]
+        for ln in lines[1:]:
+            if out.endswith(" "):
+                out += ln
+            elif is_hangul_syllable(out[-1]) and is_hangul_syllable(ln[0]):
+                out += (" " if self._space_at_join(out, ln) else "") + ln
+            elif out.endswith("-") and out[-2:-1].isascii() and out[-2:-1].isalpha() and ln[:1].isascii():
+                out = out[:-1] + ln  # 영어 하이픈 줄바꿈
+            else:
+                out += " " + ln
+        return re.sub(r" {2,}", " ", out).strip()
+
+    def _resolve_gaps(self, text: str) -> str:
+        """한글-영문 사이의 애매한 간격을 형태소 분석으로 정한다 ('2026년', 'OCR이'는 붙이고 'PDF 기준'은 띄운다)."""
+        if AMBIGUOUS_GAP not in text:
+            return text
+        parts = text.split(AMBIGUOUS_GAP)
+        out = parts[0]
+        for part in parts[1:]:
+            out += (" " if out and part and self._space_at_join(out, part) else "") + part
+        return out
+
+    def _space_at_join(self, left: str, right: str) -> bool:
+        """left와 right를 이을 때 그 자리에 공백이 필요한지 (형태소 분석)."""
+        lw, rw = left.split(), right.split()
+        if not lw or not rw:
+            return False
+        if is_hangul_syllable(lw[-1][-1]) and is_hangul_syllable(rw[0][0]):
+            a, b = " ".join(lw[-2:]), " ".join(rw[:2])  # 줄바꿈 자리: 앞뒤 두 어절을 보고 그 자리만 정한다
+            joined = self.fixer.join_lines([a, b])
+        else:
+            a = lw[-1]  # 한글-영문 사이: 맞닿은 두 어절만 다시 띄워 본다
+            joined = self.fixer.respace(a + rw[0], reset=True)
+        n, seen = len(a.replace(" ", "")), 0
+        for i, ch in enumerate(joined):
+            if ch != " ":
+                seen += 1
+                if seen == n:
+                    return joined[i + 1: i + 2] == " "
+        return False
 
     @staticmethod
     def _box(prov, ddoc) -> BBox:

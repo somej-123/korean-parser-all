@@ -32,6 +32,7 @@ class Char:
     font: str
     origin: tuple[float, float] = (0.0, 0.0)  # 글자 기준점 (x, 기준선 y)
     advance: float = 0.0  # 글꼴이 말하는 글자 폭 (loose box). 폭 정보가 깨진 글꼴은 글자 크기만큼 나온다
+    generated: bool = False  # PDF에 없는 글자: pdfium이 위치 간격을 보고 끼워 넣은 공백
 
 
 @dataclass
@@ -141,7 +142,7 @@ class PageInfo:
             cur.clear()
 
         for i, c in enumerate(chars):
-            if c.size <= 1.5 and c.text.isspace():
+            if (c.generated or c.size <= 1.5) and c.text.isspace():
                 flush()  # pdfium이 위치 간격을 보고 끼워 넣은 공백 = 단어 사이
                 continue
             if cur:
@@ -158,6 +159,42 @@ class PageInfo:
             cur.append(i)
         flush()
         return runs
+
+    def text_lines(self, box: BBox) -> list[str]:
+        """영역 안 글을 텍스트 레이어에서 줄 단위로 읽는다 (내용 순서).
+
+        PDF에 실제로 있는 공백 글자는 그대로 두고, pdfium이 끼워 넣은 공백은 글자 사이에 실제 간격이 있을 때만
+        쓴다. 글꼴이 바뀌는 자리("2026" + "년")에 끼워 넣은 폭 0짜리 공백은 버린다.
+        줄 끝의 공백은 남겨 둔다 (줄을 합칠 때 어절 경계 표시로 쓴다).
+        한글과 영문·숫자 사이의 좁은 간격은 AMBIGUOUS_GAP으로 표시한다.
+        """
+        chars = [c for c in _dedupe_overlaps(self.chars_in(box)) if not (c.text.isspace() and c.generated)]
+        if not chars:
+            return []
+        right = _right_edges([c for c in chars])
+        lines: list[str] = []
+        cur = ""
+        prev = None
+        for i, c in enumerate(chars):
+            if prev is not None:
+                p = chars[prev]
+                size = max(p.size, c.size, 1.0)
+                if abs(c.origin[1] - p.origin[1]) > size * 0.5 or c.origin[0] < p.origin[0] - size:
+                    lines.append(cur)
+                    cur = ""
+                elif not c.text.isspace() and not p.text.isspace() and c.origin[0] - right[prev] > size * 0.15:
+                    # 공백 글자 없이 위치로 띄운 단어 사이. 한글과 영문·숫자 사이의 좁은 간격은 조판 프로그램이
+                    # 자동으로 넣는 '한글-영문 간격'일 수 있어(2026년, OCR이) 판단을 미룬다 (AMBIGUOUS_GAP)
+                    mixed = _is_hangul(p.text) != _is_hangul(c.text) and p.text.isalnum() and c.text.isalnum()
+                    cur += AMBIGUOUS_GAP if mixed and c.origin[0] - right[prev] < size * 0.4 else " "
+            if c.text.isspace():
+                if cur and not cur.endswith(" "):
+                    cur += " "
+            else:
+                cur += c.text
+            prev = i
+        lines.append(cur)
+        return [ln.lstrip() for ln in lines if ln.strip()]
 
     def sample_color(self, x: float, y: float) -> str | None:
         """그 위치의 화면 색 (표 칸 배경 등). 흰색에 가까우면 None."""
@@ -326,7 +363,8 @@ class PdfPages:
             if raw.FPDFText_GetFillColor(tp.raw, i, r, g, b, a):
                 color = f"#{r.value:02X}{g.value:02X}{b.value:02X}"
             info.chars.append(Char(ch, (left, h - top, right, h - bottom), size, bold, italic, color, fname,
-                                   (ox.value, h - oy.value), max(loose.right - ox.value, 0.0)))
+                                   (ox.value, h - oy.value), max(loose.right - ox.value, 0.0),
+                                   bool(raw.FPDFText_IsGenerated(tp.raw, i) == 1)))
         tp.close()
 
         # 그래픽 개체 (이미지, 선·도형). 쪽 전체를 덮는 배경은 뺀다.
@@ -390,6 +428,13 @@ def _visible_bounds(obj) -> tuple[float, float, float, float] | None:
     return left, bottom, right, top
 
 
+AMBIGUOUS_GAP = "\u200b"  # text_lines가 띄어 쓸지 판단하지 못한 자리 (읽는 쪽이 정한다)
+
+
+def _is_hangul(ch: str) -> bool:
+    return "\uac00" <= ch <= "\ud7a3"
+
+
 def _is_symbol(ch: str) -> bool:
     return len(ch) == 1 and 0xE000 <= ord(ch) <= 0xF8FF
 
@@ -431,12 +476,16 @@ def _right_edges(chars: list[Char]) -> list[float]:
     out = []
     for i, c in enumerate(chars):
         adv = c.advance if c.advance > 0 else c.box[2] - c.origin[0]
-        if adv >= c.size * 0.9:  # 폭 정보가 깨졌을 수 있다 → 이웃 중 같은 종류(반각/전각) 글자의 보통 간격
-            near = [steps[j] for j in range(max(0, i - 8), min(n, i + 9))
+        if adv >= c.size * 0.9:
+            # 폭 정보가 깨졌을 수 있다. 같은 줄 이웃 중 같은 종류(반각/전각) 글자들이 글꼴 폭보다 일관되게
+            # 좁게 놓였으면(깨진 폭, 장평 축소) 그 보통 간격을 폭으로 본다. 'M', 'W'처럼 원래 넓은 글자는 그대로 둔다.
+            near = [j for j in range(max(0, i - 8), min(n, i + 9))
                     if steps[j] is not None and chars[j].text.isascii() == c.text.isascii()
-                    and abs(chars[j].origin[1] - c.origin[1]) < c.size * 0.25]
+                    and abs(chars[j].origin[1] - c.origin[1]) < c.size * 0.25 and chars[j].advance > 0]
             if len(near) >= 3:
-                adv = min(adv, statistics.median(near))
+                tight = statistics.median(steps[j] / chars[j].advance for j in near)
+                if tight < 0.85:
+                    adv = min(adv, statistics.median(steps[j] for j in near))
             elif c.text.isascii():
                 adv = c.size * 0.55
         step = steps[i]
