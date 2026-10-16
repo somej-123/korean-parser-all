@@ -176,8 +176,16 @@ def hwpx_preview(folder: Path) -> list[dict]:
 
     from korean_parser.parsers import parse
 
-    out = []
+    import hashlib
+
+    from korean_parser.ir import Heading as _H, Paragraph as _P
+
+    out, seen = [], set()
     for path in sorted(folder.rglob("*.hwpx")):
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        if digest in seen:  # 같은 파일의 사본
+            continue
+        seen.add(digest)
         try:
             with zipfile.ZipFile(path) as z:
                 preview = z.read("Preview/PrvText.txt").decode("utf-8", "ignore")
@@ -190,7 +198,8 @@ def hwpx_preview(folder: Path) -> list[dict]:
             doc = parse(path)
         except Exception:  # noqa: BLE001
             continue
-        pred = norm(" ".join(_plain(b) for b in from_ir(doc))).replace(" ", "")
+        # 미리보기에는 표 칸과 글상자(도형) 안 글도 들어 있으므로 모든 문단을 문서 순서대로 모은다
+        pred = norm(" ".join(b.text for b in doc.iter_blocks() if isinstance(b, (_H, _P)))).replace(" ", "")
         window = pred[: int(len(truth) * 1.3) + 200]
         lcs = (len(truth) + len(window) - Indel.distance(truth, window)) / 2
         out.append({"file": path.name, "chars": len(truth), "recall": lcs / len(truth)})
