@@ -846,8 +846,20 @@ class PdfParser:
                          style=self._layout(page, box))
 
     def _assign_heading_levels(self) -> None:
-        """Docling은 제목 단계를 거의 1로 준다. 글자 크기 순서로 단계를 다시 매긴다."""
+        """Docling은 제목 단계를 거의 1로 준다. 글자 크기 순서로 단계를 다시 매긴다.
+
+        스캔(OCR)은 글자 크기를 글 상자 높이로 짐작해서 같은 단계 제목도 11~14pt로 흩어진다. 크기 순서로 매기면 크기마다
+        새 단계가 생겨 6단계까지 벌어졌다 (정답 세트 스캔 제목 단계 0.572). 스캔은 번호 종류가 처음 나온 순서(Ⅰ. → 1,
+        1. → 2 …)로 단계를 정하고, 번호 없는 제목(표지 제목 등)은 1단계로 둔다.
+        """
         entries = getattr(self, "_heading_sizes", [])
+        if self.ocr:
+            order: dict[str, int] = {}
+            for h, _ in entries:
+                m = match_marker(h.text.strip())
+                h.level = 1 if m is None else min(order.setdefault(m[0], len(order)) + 1, 6)
+                h.style_name = None
+            return
         sizes = sorted({s for _, s in entries if s}, reverse=True)
         has_title = any(h.style_name == "title" for h, _ in entries)
         for h, s in entries:
