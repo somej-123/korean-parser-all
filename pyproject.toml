@@ -14,6 +14,7 @@ requires-python = ">=3.10"
 dependencies = [
     "kiwipiepy>=0.20",
     "lxml>=5",
+    "olefile>=0.46",  # HWP 5.0 (OLE 복합 파일)
     "pydantic>=2.6",
 ]
 

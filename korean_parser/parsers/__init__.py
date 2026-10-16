@@ -29,6 +29,15 @@ def _hwpx(path: Path) -> Document:
     return parse_hwpx(path)
 
 
+def _hwp(path: Path) -> Document:
+    from .hwp import HwpError, parse_hwp
+
+    try:
+        return parse_hwp(path)
+    except HwpError as exc:
+        raise DocumentError(str(exc)) from exc
+
+
 def _pdf(path: Path) -> Document:
     from .pdf import PdfEngineMissing, parse_pdf
 
@@ -40,6 +49,7 @@ def _pdf(path: Path) -> Document:
 
 _PARSERS = {
     "docx": _docx,
+    "hwp": _hwp,
     "hwpx": _hwpx,
     "pdf": _pdf,
 }
@@ -87,9 +97,14 @@ def parse(path: str | Path, korean: bool = True) -> Document:
     """문서를 IR로 변환한다. korean=True면 한국어 처리 레이어(정규화, 개조식 계층)를 적용한다."""
     path = Path(path)
     if _is_ole(path):
-        # 암호화된 DOCX도 확장자는 .docx지만 실제로는 OLE 파일이다
-        raise DocumentError(f"{path.name}: 암호화된 문서이거나 구형 바이너리 형식(.doc/.hwp)입니다")
-    fmt = detect_format(path)
+        from .hwp import is_hwp
+
+        if not is_hwp(path):
+            # 암호화된 DOCX도 확장자는 .docx지만 실제로는 OLE 파일이다
+            raise DocumentError(f"{path.name}: 암호화된 문서이거나 구형 바이너리 형식(.doc)입니다")
+        fmt = "hwp"
+    else:
+        fmt = detect_format(path)
     if fmt not in _PARSERS:
         raise DocumentError(
             f"{path.name}: 지원하지 않는 형식입니다 (감지: {fmt or '알 수 없음'}, 지원: {', '.join(supported_formats())})"

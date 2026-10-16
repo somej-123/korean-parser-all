@@ -2,7 +2,7 @@
 """원본 문서 렌더링과 우리 HTML 렌더링을 나란히 놓은 비교 이미지를 만든다.
 
 - 원본: LibreOffice로 PDF 변환 → 페이지 이미지 (Word와 완전히 같지는 않지만 기준으로 충분)
-        HWPX는 파일 안의 미리보기(Preview/PrvImage.png, 한컴오피스가 그린 첫 페이지)를 쓴다
+        HWPX·HWP는 파일 안의 미리보기(HWPX Preview/PrvImage.png, HWP PrvImage 스트림. 한컴오피스가 그린 첫 페이지)를 쓴다
 - 우리: korean_parser로 HTML 변환 → Chromium(Playwright)으로 전체 페이지 캡처
 
     python compare.py ../../tests/fixtures/korean_report.docx -o out/
@@ -33,6 +33,8 @@ SCALE = 96 / 72  # pt → px
 def render_original(src: Path, pages: int, work: Path) -> Image.Image:
     if src.suffix.lower() == ".hwpx":
         return hwpx_preview(src)
+    if src.suffix.lower() == ".hwp":
+        return hwp_preview(src)
     import pypdfium2 as pdfium
 
     if src.suffix.lower() == ".pdf":
@@ -54,6 +56,18 @@ def hwpx_preview(src: Path) -> Image.Image:
 
     with zipfile.ZipFile(src) as z:
         img = Image.open(io.BytesIO(z.read("Preview/PrvImage.png"))).convert("RGB")
+    width = int(595 * SCALE)
+    return img.resize((width, int(img.height * width / img.width)), Image.LANCZOS)
+
+
+def hwp_preview(src: Path) -> Image.Image:
+    """HWP(OLE) 안의 미리보기 스트림(PrvImage, PNG·BMP·GIF)을 A4 폭에 맞게 키운다."""
+    import io
+
+    import olefile
+
+    with olefile.OleFileIO(str(src)) as ole:
+        img = Image.open(io.BytesIO(ole.openstream("PrvImage").read())).convert("RGB")
     width = int(595 * SCALE)
     return img.resize((width, int(img.height * width / img.width)), Image.LANCZOS)
 
@@ -108,7 +122,7 @@ def side_by_side(left: Image.Image, right: Image.Image, title: str) -> Image.Ima
     out = Image.new("RGB", (w, h), (233, 233, 236))
     d = ImageDraw.Draw(out)
     f = _font(18)
-    source = ("한컴오피스 미리보기" if title.lower().endswith(".hwpx")
+    source = ("한컴오피스 미리보기" if title.lower().endswith((".hwpx", ".hwp"))
               else "PDF" if title.lower().endswith(".pdf") else "LibreOffice")
     d.text((pad, 12), f"원본 ({source}) — {title}", fill=(30, 30, 30), font=f)
     d.text((left.width + pad * 2, 12), "korean-parser HTML (Chromium)", fill=(30, 30, 30), font=f)

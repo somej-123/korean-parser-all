@@ -67,7 +67,11 @@ ARCHITECTURE의 'OCR 띄어쓰기'). OCR이 빠뜨린 ○ □ 기호도 모양�
   경로로 인식한다. IR에서 제목으로 바꿀지는 범위 판단이 필요하다 (원문에 없는 해석을 넣는 것인지).
 - HWPX: 문단 중간에 놓인 글상자 글이 문단 앞에 나온다 (미리보기와 순서 차이).
 - PDF 표: 점선·선 굵기를 실선으로 그림. 굵은 글꼴 정보가 없는 PDF의 머리 행 굵게.
-- 5단계: HWP 5.0(바이너리), PPTX, XLSX 파서. EMF/WMF 그림 → PNG 변환. Office 2016 신형 차트(chartex).
+- 5단계: PPTX, XLSX 파서. EMF/WMF 그림 → PNG 변환. Office 2016 신형 차트(chartex).
+- HWP 5.0 (v0.8 완료): 그림을 뺀 그리기 개체(사각형·선·연결선·묶음)를 SVG로 그리기, 차트·양식 개체·덧말 읽기가 남았다.
+  HWPX 파서의 `ShapeReader`가 읽는 XML(hp:rect, hp:renderingInfo …)로 SHAPE_COMPONENT 레코드를 옮기면 된다.
+  재배포할 수 있는 HWP 시험 파일이 없어 시험은 레코드를 직접 만든다 (`tests/test_hwp.py`).
+  hwplib(neolord0, Apache-2.0)의 시험 파일을 받아 쓰려면 받기 전에 사용자 확인이 필요하다.
 
 ## 4. 저장소 밖에 있던 것
 

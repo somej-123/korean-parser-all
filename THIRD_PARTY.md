@@ -12,7 +12,8 @@ Docling·RapidOCR이 내려받습니다. 함께 묶어 배포한다면 각 라�
 |---|---|---|---|
 | [Kiwi / kiwipiepy](https://github.com/bab2min/kiwipiepy) 0.24 (모델 kiwipiepy_model 포함) | 띄어쓰기 복원, 형태소 분석 (`spacing.py`) | bab2min | Apache-2.0 |
 | [pydantic](https://github.com/pydantic/pydantic) 2.14 | 문서 모델(IR) 정의·JSON 저장 (`ir.py`) | Pydantic | MIT |
-| [lxml](https://lxml.de/) 6.1 | DOCX·HWPX XML 읽기 | lxml 개발자 | BSD-3-Clause |
+| [lxml](https://lxml.de/) 6.1 | DOCX·HWPX XML 읽기, HWP를 HWPX 모양 XML로 옮기기 | lxml 개발자 | BSD-3-Clause |
+| [olefile](https://github.com/decalage2/olefile) 0.47 | HWP 5.0 파일(OLE 복합 파일) 열기 | Philippe Lagadec | BSD (2-Clause) |
 
 ## PDF·스캔 PDF (`pip install "korean-parser[pdf]"`)
 
@@ -57,6 +58,15 @@ Docling은 이 밖에도 Hugging Face transformers·huggingface-hub(Apache-2.0),
 | `tests/fixtures/korean_report.docx`, `.pdf` | 이 프로젝트가 만듦 (`make_korean_report.py`) | Apache-2.0 (이 프로젝트) |
 
 자세한 원본 경로는 [tests/fixtures/hwpx/NOTICE.md](tests/fixtures/hwpx/NOTICE.md)에 있습니다.
+
+## 참고한 형식 문서
+
+| 문서 | 쓰는 곳 | 출처 |
+|---|---|---|
+| 한글 문서 파일 형식 5.0 (revision 1.3) | HWP 파서 (`korean_parser/parsers/hwp/`) | 한글과컴퓨터 공개 문서 ([cdn.hancom.com](https://cdn.hancom.com/link/docs/한글문서파일형식_5.0_revision1.3.pdf)) |
+| OWPML (KS X 6101, HWPX) | HWPX 파서 | 한글과컴퓨터 / 국가표준 |
+
+본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
 
 ## 가져다 쓴 방법·지표
 
