@@ -89,6 +89,15 @@ def test_no_space_before_closing_punctuation():
     assert respace_line(img, "제출한다.본", H) == "제출한다. 본"
 
 
+@pytest.mark.parametrize("ocr_text, want", [("2026사업계획서", "2026 사업계획서"), ("2026년도사업", "2026년도 사업"),
+                                             ("2단계요구사항", "2단계 요구사항")])
+def test_space_after_digit_only_before_non_unit(ocr_text, want):
+    # 숫자 글꼴은 옆 여백이 넓어 '2026년도'도 공백만큼 벌어진다. 빈칸 폭은 같으므로 뒤가 단위(년, 단계 …)면 붙이고,
+    # 단위가 아닌 낱말이면 띄운다 (실제 스캔 '2026 사업계획서'가 '2026사업계획서'로 붙었다)
+    spaced = want.replace("2026년도", "2026 년도").replace("2단계", "2 단계")
+    assert respace_line(_line(spaced, mixed_gap=0.5), ocr_text, H) == want
+
+
 @pytest.mark.parametrize("bullet, ocr_text", [("○", "하자보수기간은"), ("○", "O하자보수기간은"),
                                                ("○", "ㅇ하자보수기간은"), ("□", "하자보수기간은")])
 def test_bullet_recovered_from_shape(bullet, ocr_text):

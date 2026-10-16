@@ -149,6 +149,19 @@ def test_scanned_pdf_spacing(doc, tmp_path):
     assert f1 >= 0.85, f1  # 그림 빈칸을 쓰기 전에는 0.74
 
 
+def test_real_scan_structure():
+    # 실제 스캔본 (benchmarks/docling-cpu/samples, 같은 내용의 DOCX가 정답). 고치기 전에는
+    # 표지 제목이 머리말로 분류되어 '2026사업계획서' 문단이 되었고, 그림의 자식으로 분류된 캡션이 사라졌으며,
+    # 차트 제목 '분기별 매출(억원)'이 절 제목이 되고, 쪽을 넘는 문단이 둘로 나뉘었다
+    pytest.importorskip("onnxruntime")
+    scan = parse(Path(__file__).parents[1] / "benchmarks" / "docling-cpu" / "samples" / "사업계획서_스캔.pdf")
+    assert [h.text for h in of(scan, Heading)] == ["2026 사업계획서", "1. 개요", "2. 예산 계획", "3. 실적 추이", "4. 추진 일정"]
+    fig = of(scan, Figure)[0]
+    assert fig.caption == "그림 1. 분기별 매출 추이" and fig.inner_text.startswith("분기별 매출(억원)")
+    body = [b.text for b in scan.blocks if isinstance(b, Paragraph) and b.text.startswith("본 문서는")]
+    assert len(body) == 6 and body[-1].endswith("업무를 수행합니다.")
+
+
 def test_table_of_contents_lines_stay_paragraphs():
     # 목차(Docling document_index)는 표 구조 모델에 맡기지 않는다. 맡기면 번호와 제목이 다른 칸으로 갈라졌다
     toc = parse(Path(__file__).parent / "fixtures" / "toc.pdf")

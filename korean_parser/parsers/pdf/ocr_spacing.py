@@ -249,7 +249,7 @@ def respace_line(mask: np.ndarray, text: str, box_h_px: float, space_gap: float 
             gap = (spans[i - a][0] - spans[i - a - 1][1] - 1) / em
             if _mixed(chars[i - 1], chars[i]) and gap >= space_gap * MIXED_RATIO:
                 spaces.add(i)
-    spaces = {i for i in spaces if _space_allowed(chars[i - 1], chars[i])}
+    spaces = {i for i in spaces if _space_allowed(chars, i)}
     out = []
     for i, ch in enumerate(chars):
         if i in spaces:
@@ -330,15 +330,27 @@ def _mixed(a: str, b: str) -> bool:
     return not ({ka, kb} <= {"D", "P"} and (a in ",." or b in ",."))
 
 
-def _space_allowed(a: str, b: str) -> bool:
-    """닫는 문장부호 앞, 여는 괄호 뒤에는 공백이 오지 않는다. 숫자 바로 뒤의 한글('2026년', '8개월')도 붙인다.
+# 숫자 뒤에 붙여 쓰는 단위·세는 말. 숫자 뒤 한글이 이것으로 시작하면 빈칸이 넓어도 붙인다 ('2026년도', '2단계')
+_UNITS = tuple(sorted("""
+년 년도 년간 년차 월 일 시 분 초 주 주년 주차 개 개월 개소 개사 개국 명 인 원 억 만 천 백 조 경 차 차년도 단계 분기 반기
+회 회차 호 번 번째 층 대 세 세기 건 권 장 쪽 면 종 곳 박 학년 학기 기 위 등 점 배 퍼센트 평 톤 개년 가지 부 항 절 편
+과 과목 시간 시경 동 리 가 로 길 석 판 쇄 군 급 명분 선 칸 줄 쌍 벌 켤레 마리 그루 대째 째 품목 식 본 매 통 병 잔 그램 킬로
+""".split(), key=len, reverse=True))
 
-    숫자 글꼴은 옆 여백이 넓어 '2026년' 사이도 공백만큼 벌어지는 경우가 있다. 형태소 분석 띄어쓰기의 '숫자 뒤' 규칙과 같다.
+
+def _space_allowed(chars: list[str], i: int) -> bool:
+    """chars[i] 앞에 공백을 둘 수 있는가. 닫는 문장부호 앞, 여는 괄호 뒤에는 공백이 오지 않는다.
+
+    숫자 바로 뒤의 단위('2026년', '8개월', '2단계')도 붙인다: 숫자 글꼴은 옆 여백이 넓어 '2026년' 사이도 공백만큼
+    벌어진다 (실제 스캔에서 '2026 년도'의 빈칸 0.38em, 진짜 공백인 제목 '2026 사업계획서'는 0.37em으로 폭으로는 가를 수
+    없다). 숫자 뒤가 단위가 아닌 낱말이면 빈칸대로 띄운다.
     """
+    a, b = chars[i - 1], chars[i]
     if b in ".,:;)]}%" or a in "([{":
         return False
     if a.isdigit() and "가" <= b <= "힣":
-        return False
+        rest = "".join(chars[i:i + 4])
+        return not any(rest.startswith(u) for u in _UNITS)
     return True
 
 

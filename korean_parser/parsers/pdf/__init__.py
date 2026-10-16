@@ -202,6 +202,8 @@ class PdfParser:
         self.doc = Document(meta=Meta(source_name=self.path.name, source_format="pdf"))
         self._seq = 0
         self._content: dict[int, BBox] = {}  # 쪽별 본문 영역
+        self._ocr_cells: dict[int, list] = {}
+        self._done: set[str] = set()  # 블록으로 만든 Docling 항목 (그림이 뒤늦게 가져가지 않도록)
 
     def _new_id(self) -> str:
         self._seq += 1
@@ -227,7 +229,9 @@ class PdfParser:
         self._model_tables = {} if self.ocr else self._run_table_model(ddoc)
         # 텍스트 레이어가 있으면 글은 그 레이어에서 다시 읽는다 (Docling 글은 공백이 자주 빠진다).
         # OCR 글은 쪽 그림의 글자 사이 빈칸으로 공백을 되살린다. 둘 다 못 한 글만 형태소 분석으로 띄어쓰기를 복원한다.
-        keep = self._restore_ocr_spacing(_ocr_clusters(result), ddoc) if self.ocr else self._restore_text_layer(ddoc)
+        clusters = _ocr_clusters(result) if self.ocr else {}
+        self._ocr_cells = {n: [c for _, cells in cl for c in cells] for n, cl in clusters.items()}  # 쪽 → OCR 글자 상자
+        keep = self._restore_ocr_spacing(clusters, ddoc) if self.ocr else self._restore_text_layer(ddoc)
         report = postprocess_docling(ddoc, fixer=self.fixer, keep_spacing=keep, ocr=self.ocr)
         self.spacing_reset = report.spacing_reset
         for table, tdoc in self._model_tables.values():
@@ -533,6 +537,7 @@ class PdfParser:
         for item, _level in ddoc.iterate_items(included_content_layers={ContentLayer.BODY}):
             if item.self_ref in skip or not getattr(item, "prov", None):
                 continue
+            self._done.add(item.self_ref)
             prov = item.prov[0]
             page_no, box = prov.page_no, self._box(prov, ddoc)
             page = self.pages.page(page_no)
@@ -582,7 +587,12 @@ class PdfParser:
             near_top, near_bottom = box[3] < page.height * 0.12, box[1] > page.height * 0.88
             repeated = not multi_page or len(pages_of[_strip_digits(item.text)]) > 1
             if not repeated:
-                misplaced.append(self._paragraph(item, page, box))
+                if page_no == 1 and box[1] < page.height * 0.12 and self._looks_like_title(page, box):
+                    title = self._heading(item, page, box)
+                    title.style_name = "title"
+                    misplaced.append(title)
+                else:
+                    misplaced.append(self._paragraph(item, page, box))
                 continue
             if item.label == DocItemLabel.PAGE_HEADER and near_top or item.label == DocItemLabel.PAGE_FOOTER and near_bottom:
                 target = self.doc.header if item.label == DocItemLabel.PAGE_HEADER else self.doc.footer
@@ -598,10 +608,18 @@ class PdfParser:
             self._insert_by_position(self._ruled_table(grid, self.pages.page(n)))
         self._fix_page_order()
         self._merge_split_tables()
-        if not self.ocr:
-            self._merge_split_paragraphs()
+        self._merge_split_paragraphs()
         self._attach_captions()
         self._vertical_spacing()
+
+    def _looks_like_title(self, page: PageInfo, box: BBox) -> bool:
+        """쪽 맨 위 한 줄이 문서의 다른 제목보다 확실히 큰 글씨인가 (Docling이 표지 제목을 머리말로 분류하는 경우).
+
+        스캔 '2026 사업계획서'(상자 높이 29.6pt, 절 제목 '1. 개요' 16.8pt)가 머리말로 분류되어 본문 문단이 되었다.
+        """
+        _, size = self._text_style(page, box)
+        others = [s for _, s in getattr(self, "_heading_sizes", []) if s]
+        return bool(size and others and size >= max(others) * 1.3)
 
     def _vertical_spacing(self) -> None:
         """같은 쪽에서 앞 블록과의 세로 간격을 '앞 간격'으로 옮겨 원본의 여백 느낌을 살린다."""
@@ -737,13 +755,20 @@ class PdfParser:
         elif b.prov.page != a.prov.page or not (0 <= bb[1] - ab[3] <= size * 1.0) or bb[0] > ab[2] or bb[2] < ab[0]:
             return False
         # 앞 문단의 마지막 줄이 본문 오른쪽 끝까지 찼는가
-        page = self.pages.page(a.prov.page)
-        chars = [c for c in page.chars_in(ab) if c.text.strip()]
         content = self._content.get(a.prov.page)
-        if not chars or not content:
-            return False
-        last = max(c.origin[1] for c in chars)
-        line = [c for c in chars if abs(c.origin[1] - last) < size * 0.5]
+        if self.ocr:  # 스캔: OCR 글자 상자의 마지막 줄
+            cells = [c for c in self._ocr_cells.get(a.prov.page, []) if inside_ratio(c.box, expand(ab, 2)) > 0.6]
+            if not cells or not content:
+                return False
+            last = max((c.box[1] + c.box[3]) / 2 for c in cells)
+            line = [c for c in cells if abs((c.box[1] + c.box[3]) / 2 - last) < (c.box[3] - c.box[1]) * 0.5]
+        else:
+            page = self.pages.page(a.prov.page)
+            chars = [c for c in page.chars_in(ab) if c.text.strip()]
+            if not chars or not content:
+                return False
+            last = max(c.origin[1] for c in chars)
+            line = [c for c in chars if abs(c.origin[1] - last) < size * 0.5]
         right, left = max(c.box[2] for c in line), min(c.box[0] for c in line)
         # 오른쪽 정렬한 짧은 줄('2023년 2월 28일 제정')은 끝까지 찬 줄이 아니다: 줄 길이도 본문 폭의 절반 이상이어야 한다
         return right >= content[2] - max(size * 1.5, 10) and right - left >= (content[2] - content[0]) * 0.5
@@ -1199,7 +1224,20 @@ class PdfParser:
             t = ref.resolve(ddoc)
             if isinstance(t, TextItem) and t.prov and t.text.strip():
                 texts.append((t, self._box(t.prov[0], ddoc)))
-        caption_refs = {c.cref for c in item.captions}
+        # Docling이 캡션을 captions가 아니라 그림의 자식(label=caption)으로 넣는 경우도 있다 (스캔 '그림 1. 분기별 매출 추이')
+        caption_refs = {c.cref for c in item.captions} | {t.self_ref for t, _ in texts if t.label == DocItemLabel.CAPTION}
+        if self.ocr:
+            # 스캔: 그림 영역 위쪽에 걸친 번호 없는 제목·글(차트 제목 '분기별 매출(억원)')은 그림 안 글자다.
+            # Docling은 이것을 그림 밖 절 제목으로 분류한다
+            for t in ddoc.texts:
+                if (t.self_ref in self._done or t.self_ref in used or len(t.prov) != 1 or t.prov[0].page_no != page.number
+                        or t.label not in (DocItemLabel.SECTION_HEADER, DocItemLabel.TEXT) or not t.text.strip()):
+                    continue
+                tb = self._box(t.prov[0], ddoc)
+                if (inside_ratio(tb, expand(box, 3)) >= 0.3 and tb[0] >= box[0] - 3 and tb[2] <= box[2] + 3
+                        and match_marker(t.text.strip()) is None and not _CAPTION.match(t.text.strip())):
+                    used.add(t.self_ref)
+                    texts.insert(0, (t, expand(box, -1)))
 
         figures: list[tuple[BBox, list[str]]] = [(g, []) for g in groups]
         loose: list[tuple[object, BBox]] = []
