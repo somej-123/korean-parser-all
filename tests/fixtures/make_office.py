@@ -3,9 +3,12 @@
 라이선스가 분명한 한국어 PPTX·XLSX가 드물어 직접 만든다 (python-pptx, openpyxl).
 
 PPTX: 제목 슬라이드, 단계가 있는 글머리 목록, 병합 칸이 있는 표, 막대 차트, 그림, 묶음 안 글상자, 발표자 메모, 바닥글
-XLSX: 시트 두 개, 가로·세로 병합, 숫자·날짜·백분율·천 단위 표시 형식, 수식(저장된 값), 굵은 머리 행과 칸 배경, 숨긴 시트
+PPTX(plain): 자리 표시자 없이 글상자로만 만든 슬라이드 4장 (큰 글씨 제목, 두 단 비교, 슬라이드마다 같은 바닥글과 쪽 번호,
+             '방법 N' 이름표, 파일 경로가 대체 텍스트인 그림) — 실제 PptxGenJS 문서를 흉내 낸다
+XLSX: 시트 두 개, 가로·세로 병합, 숫자·날짜·백분율·천 단위 표시 형식, 수식(저장된 값), 굵은 머리 행과 칸 배경, 숨긴 시트,
+      값 캐시 없는 막대 차트(openpyxl은 캐시를 쓰지 않는다)
 
-    python tests/fixtures/make_office.py   # → tests/fixtures/sample.pptx, sample.xlsx
+    python tests/fixtures/make_office.py   # → tests/fixtures/sample.pptx, sample_plain.pptx, sample.xlsx
 """
 
 from __future__ import annotations
@@ -67,6 +70,39 @@ def make_pptx() -> None:
     prs.save(HERE / "sample.pptx")
 
 
+def make_plain_pptx() -> None:
+    from PIL import Image
+    from pptx import Presentation
+    from pptx.util import Emu, Pt
+
+    prs = Presentation()
+    blank = prs.slide_layouts[6]
+    buf = io.BytesIO()
+    Image.new("RGB", (20, 20), (200, 160, 20)).save(buf, "PNG")
+
+    def box(slide, text, x, y, w, h, size):
+        tb = slide.shapes.add_textbox(Emu(int(x * 12700)), Emu(int(y * 12700)), Emu(int(w * 12700)), Emu(int(h * 12700)))
+        tb.text_frame.text = text
+        for run in tb.text_frame.paragraphs[0].runs:
+            run.font.size = Pt(size)
+        return tb
+
+    for n in range(1, 5):
+        s = prs.slides.add_slide(blank)
+        box(s, f"방법 {5 - n}", 30, 20, 120, 20, 12)  # 위쪽 가장자리의 이름표: 숫자가 슬라이드 번호와 달라 내용으로 남는다
+        box(s, f"검토 항목 {n}", 30, 80, 600, 40, 32)  # 제목처럼 쓴 큰 글씨
+        box(s, "장점", 40, 150, 250, 24, 14)
+        box(s, "+ 처리가 빠르다", 40, 180, 250, 24, 14)
+        box(s, "단점", 360, 150, 250, 24, 14)
+        box(s, "- 값이 비싸다", 360, 180, 250, 24, 14)
+        box(s, "내부 검토용 자료", 30, 510, 300, 20, 10)  # 슬라이드마다 같은 바닥글
+        box(s, f"{n} / 4", 640, 510, 60, 20, 10)  # 쪽 번호
+        if n == 2:
+            pic = s.shapes.add_picture(io.BytesIO(buf.getvalue()), Emu(500 * 12700), Emu(250 * 12700))
+            pic._element.nvPicPr.cNvPr.set("descr", "/home/user/ppt/icon_check.png")
+    prs.save(HERE / "sample_plain.pptx")
+
+
 def make_xlsx() -> None:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
@@ -92,8 +128,16 @@ def make_xlsx() -> None:
     ws["C4"].number_format = "0%"
     ws["B5"].number_format = "yyyy-mm-dd"
     ws2 = wb.create_sheet("일정")
-    ws2.append(["단계", "기간"])
-    ws2.append(["분석", "2개월"])
+    ws2.append(["단계", "기간", "진행률"])
+    ws2.append(["분석", "2개월", 1.0])
+    ws2.append(["설계", "1개월", 0.45])
+    from openpyxl.chart import BarChart, Reference
+
+    chart = BarChart()
+    chart.title = "단계별 진행률"
+    chart.add_data(Reference(ws2, min_col=3, min_row=1, max_row=3), titles_from_data=True)
+    chart.set_categories(Reference(ws2, min_col=1, min_row=2, max_row=3))
+    ws2.add_chart(chart, "E2")
     hidden = wb.create_sheet("숨김")
     hidden.append(["내부 메모"])
     hidden.sheet_state = "hidden"
@@ -102,4 +146,5 @@ def make_xlsx() -> None:
 
 if __name__ == "__main__":
     make_pptx()
+    make_plain_pptx()
     make_xlsx()

@@ -140,7 +140,7 @@ def annotate_heading_guesses(doc: Document) -> None:
             ranks.clear()
         elif isinstance(b, Paragraph):
             found = finder.paragraph(b)
-            if found is not None:
+            if found is not None and b.heading_guess is None:  # 파서가 먼저 붙인 추정(슬라이드 제목 등)은 그대로
                 _, why, kind = found
                 rank = ranks.setdefault(kind, len(ranks))
                 b.heading_guess = HeadingGuess(level=min(finder.heading_level + rank + 1, 6), reason=why)

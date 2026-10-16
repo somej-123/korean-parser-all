@@ -12,7 +12,11 @@
 - 제목 자리 표시자(title, ctrTitle) → Heading(1단계). 원본 구조에 있는 정보다
 - 내용 자리 표시자(body, obj 등)의 문단 → 글머리 목록(ListInfo, 단계 = a:pPr lvl). 글머리 기호·자동 번호는 슬라이드에
   적힌 값(buChar, buAutoNum, buNone)을 먼저 쓰고, 없으면 '•'
-- 읽는 순서: 제목 → 나머지는 위에서 아래, 왼쪽에서 오른쪽 (자리 표시자 위치가 슬라이드에 없으면 레이아웃·마스터 것)
+- 읽는 순서: 제목 → 나머지는 XY 자르기(빈 띠로 위아래·좌우를 나누되 더 넓은 빈 띠부터)로. 두 단 비교, 카드 세 장 같은
+  배치를 단(카드)마다 읽는다. 자리 표시자 위치가 슬라이드에 없으면 레이아웃·마스터 것
+- 자리 표시자 없이 글상자로 만든 슬라이드: 여러 슬라이드의 같은 자리에 되풀이되는 글(바닥글, 쪽 번호)은 머리말·꼬리말로
+  옮기고, 슬라이드 위쪽의 가장 큰 글씨는 제목 추정(heading_guess)을 붙인다 (원본에 제목 정보가 없으므로 Heading으로 바꾸지 않는다)
+- 그림 대체 텍스트가 파일 경로이면('/home/…/icon.png', 만든 프로그램이 넣은 값) 파일 이름만 남긴다
 - 표(a:tbl): 가로·세로 병합, 칸 배경, 테두리, 세로 정렬. 차트: DOCX 차트 해석을 그대로 쓴다
 - 그림 → Figure. SmartArt → 안의 글만 문단으로. 글 없는 도형(장식·선)은 아직 그리지 않는다 (경고)
 - 발표자 메모 → 슬라이드 끝에 문단 (style_name='slide_notes')
@@ -24,11 +28,14 @@ from __future__ import annotations
 import base64
 import mimetypes
 import posixpath
+import re
+import statistics
+from collections import Counter
 from pathlib import Path
 
 from ...ir import (
-    Block, Border, Borders, Break, Cell, Document, Figure, Heading, Image, ListInfo, Meta, PageBreak, PageSetup,
-    Paragraph, ParagraphStyle, Provenance, Row, Table, Text, TextStyle,
+    Block, Border, Borders, Break, Cell, Document, Figure, Heading, HeadingGuess, Image, ListInfo, Meta, PageBreak,
+    PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Table, Text, TextStyle,
 )
 from ..docx.drawing import Theme, read_chart, read_color
 from ..ooxml import R_EMBED, R_ID, Package, ln
@@ -129,6 +136,8 @@ class PptxParser:
             if n > 1:
                 self.doc.blocks.append(PageBreak(id=self._new_id(), prov=self._prov(n)))
             self.doc.blocks.extend(self._slide(part, n))
+        self._move_repeated_text(len(slides))
+        self._guess_slide_titles()
         core = self.pkg.core()
         m = self.doc.meta
         m.title, m.author = core.get("title"), core.get("author")
@@ -153,8 +162,9 @@ class PptxParser:
         if tree is not None:
             for el, xf in self._shapes(tree, (0, 0, 1, 1)):
                 items.extend(self._shape(el, xf, n))
-        items.sort(key=lambda it: it[0])
-        out = [b for _, blocks in items for b in blocks]
+        titles = [it for it in items if it[0][0] == 0]
+        rest = [it for it in items if it[0][0] != 0]
+        out = [b for _, blocks in titles + xy_order(rest) for b in blocks]
         out.extend(self._notes(part, n))
         return out
 
@@ -233,7 +243,7 @@ class PptxParser:
         if kind in _SKIP_PH:
             return []
         box = self._box(el, xf, ph)
-        key = (0 if kind in _TITLE else 1, round(box[1] / 4) if box else 9999, box[0] if box else 0)
+        key = (0 if kind in _TITLE else 1, box)
         if name == "pic":
             fig = self._picture(el, n, box)
             return [(key, [fig])] if fig else []
@@ -347,6 +357,8 @@ class PptxParser:
             return None
         nv = el.find(f".//{q('p:cNvPr')}")
         alt = (nv.get("descr") or "").strip() or None if nv is not None else None
+        if alt and re.search(r"[/\\]", alt) and re.search(r"\.(png|jpe?g|gif|bmp|svg|emf|wmf|tiff?)$", alt, re.I):
+            alt = re.split(r"[/\\]", alt)[-1]  # 만든 프로그램이 넣은 파일 경로: 파일 이름만
         w, h = (box[2] - box[0], box[3] - box[1]) if box else (None, None)
         return Figure(id=self._new_id(), prov=self._prov(n, box), image_id=image_id, width_pt=w, height_pt=h, alt=alt)
 
@@ -414,6 +426,86 @@ class PptxParser:
             table.rows.append(row)
         return table
 
+    def _move_repeated_text(self, n_slides: int) -> None:
+        """여러 슬라이드의 같은 자리에 되풀이되는 글(바닥글, 쪽 번호)을 머리말·꼬리말로 옮긴다.
+
+        자리 표시자 없이 글상자로 만든 슬라이드는 바닥글·쪽 번호가 슬라이드마다 본문에 들어 있다. 같은 글이
+        같은 자리(5pt 안)에 슬라이드 절반 이상(3장 이상) 나오고 (슬라이드 번호와 같은 숫자만 다를 수 있다), 슬라이드 위·아래 가장자리(높이의 12%) 안에 있으면 꾸밈 글로
+        본다 (PDF의 되풀이 머리말·꼬리말 판단과 같다). 가장자리 조건이 없으면 같은 틀의 슬라이드마다 같은 자리에 놓인
+        '진행 순서', '방법 1' 같은 내용 이름표까지 옮겨졌다 (실제 PPTX). 쪽 번호(숫자만)는 버리고, 나머지는 위쪽이면 머리말,
+        아래쪽이면 꼬리말에 한 번만 둔다.
+        """
+        if n_slides < 3:
+            return
+
+        def key(b):
+            # 슬라이드 번호와 같은 숫자만 '#'로 ('02 / 14'는 쪽 번호, '방법 1'·'방법 2'는 내용이라 서로 다른 글)
+            x0, y0 = b.prov.bbox[0], b.prov.bbox[1]
+            # 첫 번째만: 마지막 슬라이드의 '4 / 4'에서 전체 수까지 바꾸면 다른 슬라이드의 '# / 4'와 달라진다
+            text = re.sub(rf"(?<!\d)0*{b.prov.page}(?!\d)", "#", " ".join(b.text.split()), count=1)
+            return text, round(x0 / 5), round(y0 / 5)
+
+        height = self.doc.page.height_pt if self.doc.page else 540.0
+
+        def at_edge(b) -> bool:
+            return b.prov.bbox[1] < height * 0.12 or b.prov.bbox[3] > height * 0.88
+
+        cands = [b for b in self.doc.blocks if isinstance(b, Paragraph) and b.prov and b.prov.bbox and b.text.strip()
+                 and at_edge(b)]
+        pages: Counter = Counter()
+        seen = set()
+        for b in cands:
+            k = key(b)
+            if (k, b.prov.page) not in seen:
+                seen.add((k, b.prov.page))
+                pages[k] += 1
+        repeated = {k for k, c in pages.items() if c >= max(3, n_slides / 2)}
+        if not repeated:
+            return
+        kept: dict = {}
+        out = []
+        for b in self.doc.blocks:
+            if isinstance(b, Paragraph) and b.prov and b.prov.bbox and b.text.strip() and at_edge(b) and key(b) in repeated:
+                k = key(b)
+                if k not in kept and not re.fullmatch(r"[#\d\s/|\-·.]*", k[0]):  # 쪽 번호('3', '3 / 14')만이면 버린다
+                    kept[k] = b
+                    (self.doc.header if b.prov.bbox[1] < height / 2 else self.doc.footer).append(b)
+                continue
+            out.append(b)
+        self.doc.blocks = out
+
+    def _guess_slide_titles(self) -> None:
+        """제목 자리 표시자가 없는 슬라이드: 위쪽 40% 안의 가장 큰 글씨 글상자에 제목 추정을 붙인다.
+
+        그 크기가 슬라이드 글자 크기 중앙값(글자 수 가중)의 1.25배 이상이고 60자 이하일 때만. 같은 글상자의 같은 크기 문단
+        (두 줄 제목)은 함께 표시한다.
+        """
+        height = self.doc.page.height_pt if self.doc.page else 540.0
+        slides: dict[int, list] = {}
+        for b in self.doc.blocks:
+            if b.prov and b.prov.page:
+                slides.setdefault(b.prov.page, []).append(b)
+        for blocks in slides.values():
+            if any(isinstance(b, Heading) for b in blocks):
+                continue
+            paras = [b for b in blocks if isinstance(b, Paragraph) and b.style_name != "slide_notes" and b.prov.bbox]
+            sized = [(b, max((i.style.size_pt for i in b.inlines if isinstance(i, Text) and i.style and i.style.size_pt),
+                             default=None)) for b in paras]
+            weights = [s for b, s in sized if s for _ in range(min(len(b.text), 200))]
+            if not weights:
+                continue
+            body = statistics.median(weights)
+            top = [(b, s) for b, s in sized if s and b.prov.bbox[1] < height * 0.4 and len(b.text.strip()) <= 60]
+            if not top:
+                continue
+            biggest = max(s for _, s in top)
+            if biggest < body * 1.25:
+                continue
+            box = next(b.prov.bbox for b, s in top if s == biggest)
+            for b, s in top:
+                if s == biggest and b.prov.bbox == box:
+                    b.heading_guess = HeadingGuess(level=1, reason=f"슬라이드 위쪽 가장 큰 글씨 {biggest:g}pt (본문 {body:g}pt)")
+
     def _notes(self, slide_part: str, n: int) -> list[Paragraph]:
         part = self.pkg.rel_of_type(slide_part, "notesSlide")
         root = self.pkg.xml(part) if part else None
@@ -431,3 +523,38 @@ class PptxParser:
                 p.style_name = "slide_notes"
                 out.append(p)
         return out
+
+
+def xy_order(items: list) -> list:
+    """(열쇠, 블록) 목록을 XY 자르기 순서로. 열쇠의 둘째 값이 상자(없으면 맨 뒤, 원래 차례).
+
+    상자들 사이에서 어느 상자도 걸치지 않는 빈 띠(가로·세로)를 찾아 가장 넓은 띠로 나눈다 (같으면 위아래를 먼저).
+    위아래로 나누면 위쪽부터, 좌우로 나누면 왼쪽부터 읽고, 나뉜 조각마다 되풀이한다. 두 단 비교 슬라이드는 왼쪽 단을
+    다 읽고 오른쪽 단으로, 카드 세 장은 카드마다 읽는다.
+    """
+    boxed = [it for it in items if it[0][1]]
+    loose = [it for it in items if not it[0][1]]
+
+    def gap(group, axis):
+        lo, hi = (0, 2) if axis == "x" else (1, 3)
+        spans = sorted((it[0][1][lo], it[0][1][hi]) for it in group)
+        best, edge = None, spans[0][1]
+        for a, b in spans[1:]:
+            if a - edge > 2 and (best is None or a - edge > best[0]):
+                best = (a - edge, (edge + a) / 2)
+            edge = max(edge, b)
+        return best
+
+    def order(group):
+        if len(group) <= 1:
+            return group
+        gy, gx = gap(group, "y"), gap(group, "x")
+        if gy is None and gx is None:
+            return sorted(group, key=lambda it: (round(it[0][1][1] / 4), it[0][1][0]))
+        axis, cut = ("y", gy[1]) if gy and (gx is None or gy[0] >= gx[0]) else ("x", gx[1])
+        i = 1 if axis == "y" else 0
+        first = [it for it in group if it[0][1][i] < cut]
+        second = [it for it in group if it[0][1][i] >= cut]
+        return order(first) + order(second)
+
+    return order(boxed) + loose

@@ -12,18 +12,26 @@
   숫자 표시 형식은 자주 쓰는 것만: 천 단위 쉼표(#,##0), 소수 자릿수(0.00), 백분율(0%), 날짜·시각(yyyy-mm-dd 등 → ISO).
   그 밖의 형식은 일반 숫자(유효 숫자 15자리)로 쓴다
 - 병합 칸(mergeCells) → row_span·col_span. 굵은 글씨, 단색 칸 배경, 열 너비
-- 숨긴 시트도 넣고 경고를 남긴다. 차트·그림이 있는 시트는 경고만 남긴다 (아직 읽지 않음)
+- 숨긴 시트도 넣고 경고를 남긴다
+- 시트의 차트(xl/drawings → xl/charts)는 표 뒤에 Chart로. 차트 XML에 값 캐시가 없으면(Excel이 아닌 프로그램이 만든 파일)
+  계열·범주가 가리키는 칸('일정 관리'!$E$2:$E$12)의 값으로 채운 뒤 DOCX 차트 해석을 그대로 쓴다. 그림은 Figure로
 """
 
 from __future__ import annotations
 
+import base64
 import datetime
+import mimetypes
+import posixpath
 import re
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
-from ...ir import Cell, Document, Heading, Meta, Paragraph, Provenance, Row, Table, Text, TextStyle
-from ..ooxml import R_ID, Package, ln
+from lxml import etree
+
+from ...ir import Block, Cell, Document, Figure, Heading, Image, Meta, Paragraph, Provenance, Row, Table, Text, TextStyle
+from ..docx.drawing import read_chart
+from ..ooxml import R_EMBED, R_ID, Package, ln
 
 PARSER_NAME = "xlsx-native"
 S = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -32,6 +40,10 @@ _CELL_REF = re.compile(r"^([A-Z]+)(\d+)$")
 _BUILTIN_DATE = set(range(14, 23)) | {45, 46, 47}
 _BUILTIN_FMT = {1: "0", 2: "0.00", 3: "#,##0", 4: "#,##0.00", 9: "0%", 10: "0.00%", 11: "0.00E+00",
                 37: "#,##0", 38: "#,##0", 39: "#,##0.00", 40: "#,##0.00"}
+C = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
+XDR = "{http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing}"
+A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+_RANGE = re.compile(r"^(?:'?(.+?)'?!)?\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$")
 _MAX_CELLS = 200_000  # 시트 하나의 칸 수가 이보다 많으면 앞부분만 넣고 경고 (거대한 데이터 시트)
 
 
@@ -100,6 +112,7 @@ class XlsxParser:
         self.bold_fonts: set[int] = set()
         self.fills: dict[int, str] = {}
         self.date1904 = False
+        self.values: dict[str, dict[tuple[int, int], tuple[str, float | None]]] = {}  # 시트 → 칸 → (보이는 글, 숫자)
 
     def _new_id(self) -> str:
         self._seq += 1
@@ -119,6 +132,7 @@ class XlsxParser:
         self._read_strings()
         self._read_styles()
         rels = self.pkg.rels(wb_part)
+        sheets = []
         for n, sheet in enumerate(wb.iter(f"{S}sheet"), 1):
             name = sheet.get("name", f"Sheet{n}")
             part = rels.get(sheet.get(R_ID), (None,))[0]
@@ -127,13 +141,16 @@ class XlsxParser:
             root = self.pkg.xml(part) if part else None
             if root is None:
                 continue
-            self.doc.blocks.append(Heading(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n), level=1,
-                                           inlines=[Text(text=name)]))
-            table = self._sheet(root, n, name)
+            heading = Heading(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n), level=1,
+                              inlines=[Text(text=name)])
+            sheets.append((n, name, part, root, heading, self._sheet(root, n, name)))
+        # 차트는 다른 시트의 칸을 가리킬 수 있으므로 모든 시트를 읽은 뒤에
+        for n, name, part, root, heading, table in sheets:
+            self.doc.blocks.append(heading)
             if table is not None:
                 self.doc.blocks.append(table)
             if root.find(f"{S}drawing") is not None:
-                self._warn(f"시트의 차트·그림은 아직 읽지 않음: {name}")
+                self.doc.blocks.extend(self._drawing(part, n, name))
         core = self.pkg.core()
         m = self.doc.meta
         m.title, m.author = core.get("title"), core.get("author")
@@ -210,6 +227,12 @@ class XlsxParser:
                 continue
             text = self._value(c)
             style = int(c.get("s", "0") or 0)
+            v = c.find(f"{S}v")
+            try:
+                number = float(v.text) if c.get("t", "n") == "n" and v is not None and v.text else None
+            except ValueError:
+                number = None
+            self.values.setdefault(name, {})[pos] = (text, number)
             if text or (style < len(self.xf) and self.xf[style][2] in self.fills):
                 cells[pos] = (text, style)
             if len(cells) >= _MAX_CELLS:
@@ -255,6 +278,81 @@ class XlsxParser:
                 row.cells.append(cell)
             table.rows.append(row)
         return table
+
+    # ------------------------------------------------------------------
+    # 차트·그림 (시트의 그리기 부분)
+    # ------------------------------------------------------------------
+
+    def _drawing(self, sheet_part: str, n: int, sheet_name: str) -> list[Block]:
+        part = self.pkg.rel_of_type(sheet_part, "drawing")
+        root = self.pkg.xml(part) if part else None
+        if root is None:
+            return []
+        out: list[Block] = []
+        rels = self.pkg.rels(part)
+        for anchor in root:
+            if ln(anchor) not in ("oneCellAnchor", "twoCellAnchor", "absoluteAnchor"):
+                continue
+            ext = anchor.find(f"{XDR}ext")
+            w = int(ext.get("cx", "0")) / 12700 if ext is not None else 400.0
+            h = int(ext.get("cy", "0")) / 12700 if ext is not None else 300.0
+            for frame in anchor.iter(f"{XDR}graphicFrame"):
+                ref = frame.find(f".//{C}chart")
+                chart_part = rels.get(ref.get(R_ID) if ref is not None else "", (None,))[0]
+                chart_root = self.pkg.xml(chart_part) if chart_part else None
+                if chart_root is None:
+                    self._warn(f"시트의 차트가 아닌 개체는 아직 읽지 않음: {sheet_name}")
+                    continue
+                self._fill_caches(chart_root, sheet_name)
+                chart = read_chart(chart_root, w or 400.0, h or 300.0)
+                if chart is None:
+                    self._warn(f"차트를 읽지 못함: {sheet_name}")
+                    continue
+                chart.id, chart.prov = self._new_id(), Provenance(parser=PARSER_NAME, page=n)
+                out.append(chart)
+            for pic in anchor.iter(f"{XDR}pic"):
+                blip = pic.find(f".//{A}blip")
+                target = rels.get(blip.get(R_EMBED) if blip is not None else "", (None,))[0]
+                data = self.pkg.read(target) if target else None
+                if data is None:
+                    continue
+                image_id = f"img{len(self.doc.images) + 1}"
+                mime = mimetypes.guess_type(target)[0] or "application/octet-stream"
+                self.doc.images[image_id] = Image(mime=mime, data_base64=base64.b64encode(data).decode("ascii"),
+                                                  name=posixpath.basename(target))
+                nv = pic.find(f".//{XDR}cNvPr")
+                out.append(Figure(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n), image_id=image_id,
+                                  width_pt=w or None, height_pt=h or None,
+                                  alt=(nv.get("descr") or "").strip() or None if nv is not None else None))
+        return out
+
+    def _fill_caches(self, chart_root, default_sheet: str) -> None:
+        """값 캐시가 없는 계열 이름·범주·값(strRef·numRef)을 가리키는 칸의 값으로 채운다."""
+        for ref in list(chart_root.iter(f"{C}strRef")) + list(chart_root.iter(f"{C}numRef")):
+            if ref.find(f"{C}strCache") is not None or ref.find(f"{C}numCache") is not None:
+                continue
+            f = ref.find(f"{C}f")
+            cells = self._range(f.text if f is not None else "", default_sheet)
+            if cells is None:
+                continue
+            numeric = ln(ref) == "numRef" and ln(ref.getparent()) != "cat" and all(num is not None for _, num in cells)
+            cache = etree.SubElement(ref, f"{C}{'numCache' if numeric else 'strCache'}")
+            etree.SubElement(cache, f"{C}ptCount").set("val", str(len(cells)))
+            for i, (text, num) in enumerate(cells):
+                pt = etree.SubElement(cache, f"{C}pt")
+                pt.set("idx", str(i))
+                etree.SubElement(pt, f"{C}v").text = repr(num) if numeric else text
+
+    def _range(self, formula: str, default_sheet: str) -> list[tuple[str, float | None]] | None:
+        """'시트'!$A$2:$A$12 → 그 칸들의 (보이는 글, 숫자). 한 줄(가로나 세로)만."""
+        m = _RANGE.match((formula or "").strip())
+        if not m:
+            return None
+        sheet = (m.group(1) or default_sheet).replace("''", "'")
+        values = self.values.get(sheet, {})
+        r0, c0 = int(m.group(3)) - 1, col_index(m.group(2))
+        r1, c1 = (int(m.group(5)) - 1, col_index(m.group(4))) if m.group(4) else (r0, c0)
+        return [values.get((r, c), ("", None)) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)]
 
     @staticmethod
     def _col_widths(root, c0: int, c1: int) -> list[float]:
