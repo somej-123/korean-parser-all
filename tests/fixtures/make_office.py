@@ -5,10 +5,12 @@
 PPTX: 제목 슬라이드, 단계가 있는 글머리 목록, 병합 칸이 있는 표, 막대 차트, 그림, 묶음 안 글상자, 발표자 메모, 바닥글
 PPTX(plain): 자리 표시자 없이 글상자로만 만든 슬라이드 4장 (큰 글씨 제목, 두 단 비교, 슬라이드마다 같은 바닥글과 쪽 번호,
              '방법 N' 이름표, 파일 경로가 대체 텍스트인 그림) — 실제 PptxGenJS 문서를 흉내 낸다
+PPTX(diagram): 연결선으로 이은 조직도(위 상자 하나, 아래 상자 둘, 연결선 없이 같은 너비로 쌓은 상자 하나),
+               연결 정보 없이 끝점만 닿은 화살표, 글 없는 장식 사각형 — 실제 화면설계서의 '메뉴구조도'를 흉내 낸다
 XLSX: 시트 두 개, 가로·세로 병합, 숫자·날짜·백분율·천 단위 표시 형식, 수식(저장된 값), 굵은 머리 행과 칸 배경, 숨긴 시트,
       값 캐시 없는 막대 차트(openpyxl은 캐시를 쓰지 않는다)
 
-    python tests/fixtures/make_office.py   # → tests/fixtures/sample.pptx, sample_plain.pptx, sample.xlsx
+    python tests/fixtures/make_office.py   # → tests/fixtures/sample.pptx, sample_plain.pptx, sample_diagram.pptx, sample.xlsx
 """
 
 from __future__ import annotations
@@ -103,6 +105,44 @@ def make_plain_pptx() -> None:
     prs.save(HERE / "sample_plain.pptx")
 
 
+def make_diagram_pptx() -> None:
+    from lxml import etree
+    from pptx import Presentation
+    from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
+    from pptx.util import Emu, Pt
+
+    prs = Presentation()
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+
+    def emu(v):
+        return Emu(int(v * 12700))
+
+    def rect(text, x, y, w=100, h=30):
+        sh = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, emu(x), emu(y), emu(w), emu(h))
+        if text:
+            sh.text_frame.text = text
+            sh.text_frame.paragraphs[0].runs[0].font.size = Pt(12)
+        return sh
+
+    title = s.shapes.add_textbox(emu(30), emu(20), emu(300), emu(30))
+    title.text_frame.text = "메뉴구조도"
+    root = rect("산업안전", 260, 80)
+    left, right = rect("안전교육", 140, 160), rect("안전점검", 380, 160)
+    rect("교육현황", 140, 194)  # 연결선 없이 '안전교육' 바로 아래에 같은 너비로 쌓은 상자
+    for child in (left, right):
+        c = s.shapes.add_connector(MSO_CONNECTOR.ELBOW, 0, 0, 0, 0)
+        c.begin_connect(root, 2)
+        c.end_connect(child, 0)
+    # 연결 정보 없이 끝점만 두 상자에 닿은 화살표 (접수 → 처리)
+    a, b = rect("접수", 140, 330), rect("처리", 380, 330)
+    arrow = s.shapes.add_connector(MSO_CONNECTOR.STRAIGHT, emu(240), emu(345), emu(380), emu(345))
+    ln = arrow.line._get_or_add_ln()
+    etree.SubElement(ln, "{http://schemas.openxmlformats.org/drawingml/2006/main}tailEnd", type="triangle")
+    assert a and b
+    rect(None, 560, 300, 60, 60)  # 글 없는 장식 사각형
+    prs.save(HERE / "sample_diagram.pptx")
+
+
 def make_xlsx() -> None:
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill
@@ -147,4 +187,5 @@ def make_xlsx() -> None:
 if __name__ == "__main__":
     make_pptx()
     make_plain_pptx()
+    make_diagram_pptx()
     make_xlsx()

@@ -154,3 +154,25 @@ def test_xlsx_chart_without_cache_reads_cells(book):
     assert chart.title == "단계별 진행률" and chart.categories == ["분석", "설계"]
     assert chart.series[0].name == "진행률" and chart.series[0].values == [1.0, 0.45]
     assert chart.prov.page == 2  # '일정' 시트의 표 뒤
+
+
+# -- 연결선으로 이은 도형 묶음 → 도식 ----------------------------------------------
+
+
+def test_connected_shapes_become_one_drawing():
+    # 실제 화면설계서의 '메뉴구조도'(연결선 18개)가 상자 글만 흩어져 나와 위아래 관계가 사라졌다
+    from korean_parser.ir import Drawing
+    from korean_parser.render.llm import render_llm
+
+    doc = parse(FIX / "sample_diagram.pptx")
+    chart, flow = [b for b in doc.blocks if isinstance(b, Drawing)]
+    labels = {s.text_blocks[0].text for s in chart.shapes if s.text_blocks}
+    assert labels == {"산업안전", "안전교육", "안전점검", "교육현황"}  # 연결선 없이 쌓은 '교육현황'도 같은 열
+    assert sum(s.is_line for s in chart.shapes) == 2 and all(s.id.startswith("s1:") for s in chart.shapes)
+    assert min(s.x for s in chart.shapes) == 0 and chart.prov.bbox[0] == pytest.approx(140, abs=1)
+    text = render_llm(doc, with_ids=False)
+    assert "- 산업안전 — 안전교육" in text and "- 산업안전 — 안전점검" in text
+    assert "- 접수 → 처리" in text  # 연결 정보 없이 끝점만 닿은 화살표
+    # 도식에 들어간 글은 따로 문단으로 나오지 않고, 이어지지 않은 장식 사각형은 경고만
+    assert [b.text for b in doc.blocks if isinstance(b, Paragraph)] == ["메뉴구조도"]
+    assert any("장식" in w for w in doc.warnings) and flow.shapes

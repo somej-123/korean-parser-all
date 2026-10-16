@@ -18,7 +18,11 @@
   옮기고, 슬라이드 위쪽의 가장 큰 글씨는 제목 추정(heading_guess)을 붙인다 (원본에 제목 정보가 없으므로 Heading으로 바꾸지 않는다)
 - 그림 대체 텍스트가 파일 경로이면('/home/…/icon.png', 만든 프로그램이 넣은 값) 파일 이름만 남긴다
 - 표(a:tbl): 가로·세로 병합, 칸 배경, 테두리, 세로 정렬. 차트: DOCX 차트 해석을 그대로 쓴다
-- 그림 → Figure. SmartArt → 안의 글만 문단으로. 글 없는 도형(장식·선)은 아직 그리지 않는다 (경고)
+- 그림 → Figure. SmartArt → 안의 글만 문단으로
+- 연결선·선이 도형 둘 이상을 잇는 묶음(조직도, 흐름도) → Drawing 하나 (상자 글, 연결선, 연결 관계). 연결선 끝은
+  연결 정보(stCxn/endCxn)로, 없으면 끝점에서 8pt 안의 도형으로 찾는다. 묶음 범위 안에 놓인 글상자(선 위의 이름표)도
+  함께 넣는다. 도형 id는 슬라이드마다 1부터 다시 시작하므로 's슬라이드번호:id'로 바꾼다
+- 이어지지 않은 글 없는 도형(카드 배경, 색 띠, 아이콘 모양 등 장식)은 그리지 않는다 (경고)
 - 발표자 메모 → 슬라이드 끝에 문단 (style_name='slide_notes')
 - 날짜·슬라이드 번호 자리 표시자는 버리고, 바닥글(ftr)은 문서 꼬리말로
 """
@@ -34,10 +38,10 @@ from collections import Counter
 from pathlib import Path
 
 from ...ir import (
-    Block, Border, Borders, Break, Cell, Document, Figure, Heading, HeadingGuess, Image, ListInfo, Meta, PageBreak,
-    PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Table, Text, TextStyle,
+    LINE_GEOMETRIES, Block, Border, Borders, Break, Cell, Document, Drawing, Figure, Heading, HeadingGuess, Image,
+    ListInfo, Meta, PageBreak, PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Shape, Table, Text, TextStyle,
 )
-from ..docx.drawing import Theme, read_chart, read_color
+from ..docx.drawing import Theme, custom_path, read_chart, read_color, read_fill_line
 from ..ooxml import R_EMBED, R_ID, Package, ln
 
 PARSER_NAME = "pptx-native"
@@ -160,8 +164,12 @@ class PptxParser:
         tree = root.find(f"{q('p:cSld')}/{q('p:spTree')}")
         items: list[tuple[tuple, list[Block]]] = []  # (정렬 열쇠, 블록)
         if tree is not None:
-            for el, xf in self._shapes(tree, (0, 0, 1, 1)):
-                items.extend(self._shape(el, xf, n))
+            elements = list(self._shapes(tree, (0, 0, 1, 1)))
+            diagrams, used = self._diagrams(elements, n)
+            for el, xf in elements:
+                if id(el) not in used:
+                    items.extend(self._shape(el, xf, n))
+            items.extend(diagrams)
         titles = [it for it in items if it[0][0] == 0]
         rest = [it for it in items if it[0][0] != 0]
         out = [b for _, blocks in titles + xy_order(rest) for b in blocks]
@@ -253,7 +261,7 @@ class PptxParser:
         has_text = body is not None and any((t.text or "").strip() for t in body.iter(q("a:t")))
         if not has_text:
             if name in ("sp", "cxnSp") and el.find(f".//{q('a:prstGeom')}") is not None and kind is None:
-                self._warn("글 없는 도형(장식·선·연결선)은 아직 그리지 않음 (PPTX)")
+                self._warn("이어지지 않은 글 없는 도형(배경·띠·아이콘 모양 등 장식)은 그리지 않음 (PPTX)")
             return []
         if kind == "ftr":
             if not self.doc.footer:
@@ -266,6 +274,124 @@ class PptxParser:
             return [(key, [heading])]
         bullets = ph is not None and kind in _BODY_PH
         return [(key, self._paragraphs(body, n, box, bullets=bullets))]
+
+    # ------------------------------------------------------------------
+    # 연결선으로 이어진 도형 묶음 → 도식
+    # ------------------------------------------------------------------
+
+    def _diagrams(self, elements, n: int) -> tuple[list, set[int]]:
+        """연결선·선이 도형 둘 이상을 잇는 묶음마다 Drawing. (정렬 열쇠, [Drawing]) 목록과 쓴 요소의 id() 모음.
+
+        실제 화면설계서의 '메뉴구조도'(연결선 18개로 이은 조직도)가 상자 글만 흩어져 나와 위아래 관계가 사라졌다.
+        """
+        from ...render.llm import _endpoints  # 끝점 → 닿은 도형 (LLM 출력이 연결 관계를 쓰는 규칙과 같게)
+
+        cands = []  # (요소, Shape)
+        for el, xf in elements:
+            if ln(el) not in ("sp", "cxnSp") or el.find(f".//{q('p:nvPr')}/{q('p:ph')}") is not None:
+                continue
+            shape = self._ir_shape(el, xf, n)
+            if shape is not None:
+                cands.append((el, shape))
+        texts = {id(el): xf for el, xf in elements}
+        lines = [(el, s) for el, s in cands if s.is_line]
+        if not lines:
+            return [], set()
+        boxes = [s for _, s in cands if not s.is_line]
+        parent = {id(s): id(s) for _, s in cands}
+
+        def find(k):
+            while parent[k] != k:
+                parent[k] = parent[parent[k]]
+                k = parent[k]
+            return k
+
+        joined = set()  # 양 끝이 모두 도형에 닿은 선이 있는 묶음
+        for _, line in lines:
+            a, b = _endpoints(line, boxes)
+            for end in (a, b):
+                if end is not None:
+                    parent[find(id(end))] = find(id(line))
+            if a is not None and b is not None and a is not b:
+                joined.add(id(line))
+        groups: dict[int, list] = {}
+        for el, shp in cands:
+            groups.setdefault(find(id(shp)), []).append((el, shp))
+        groups = [m for m in groups.values()
+                  if any(id(shp) in joined for _, shp in m) and sum(not shp.is_line for _, shp in m) >= 2]
+        # 범위가 겹치는 묶음은 하나로 (조직도의 가지가 따로 이어져 있어도 한 도식)
+        merged = True
+        while merged:
+            merged = False
+            for i in range(len(groups)):
+                for j in range(i + 1, len(groups)):
+                    a, b = _extent(groups[i]), _extent(groups[j])
+                    if min(a[2], b[2]) > max(a[0], b[0]) and min(a[3], b[3]) > max(a[1], b[1]):
+                        groups[i] += groups.pop(j)
+                        merged = True
+                        break
+                if merged:
+                    break
+        out, used = [], {id(el) for m in groups for el, _ in m}
+        for members in groups:
+            # 묶음 범위 안의 글상자(선 위의 이름표 등)와, 묶음의 상자 바로 위·아래에 같은 너비로 쌓인 상자(조직도의
+            # 한 열: 연결선 없이 쌓은 '재해분석', '재해현황')를 넣는다. 쌓인 상자를 넣으면 범위가 늘어 다시 본다
+            grown = True
+            while grown:
+                grown = False
+                x0, y0, x1, y1 = _extent(members)
+                boxes_in = [shp for _, shp in members if not shp.is_line]
+                for el, shp in cands:
+                    if id(el) in used or not _has_text(el) or shp.is_line:
+                        continue
+                    within = shp.x >= x0 - 2 and shp.y >= y0 - 2 and shp.x + shp.width <= x1 + 2 \
+                        and shp.y + shp.height <= y1 + 2
+                    if within or any(_stacked(shp, m) for m in boxes_in):
+                        members.append((el, shp))
+                        used.add(id(el))
+                        grown = True
+            x0, y0, x1, y1 = _extent(members)
+            shapes = []
+            for el, shp in members:
+                body = el.find(q("p:txBody"))
+                blocks = self._paragraphs(body, n, self._box(el, texts[id(el)]), bullets=False) if _has_text(el) else []
+                shapes.append(shp.model_copy(update={"x": shp.x - x0, "y": shp.y - y0, "text_blocks": blocks}))
+            box = (x0, y0, x1, y1)
+            drawing = Drawing(id=self._new_id(), prov=self._prov(n, box), width_pt=round(x1 - x0, 1),
+                              height_pt=round(y1 - y0, 1), shapes=shapes)
+            out.append(((1, box), [drawing]))
+        return out, used
+
+    def _ir_shape(self, el, xf, n: int) -> Shape | None:
+        """p:sp·p:cxnSp → Shape (슬라이드 좌표, pt). 글이 있으면 글상자 문단도."""
+        sppr = el.find(q("p:spPr"))
+        box = self._box(el, xf)
+        if sppr is None or box is None:
+            return None
+        x, y, w, h = box[0], box[1], box[2] - box[0], box[3] - box[1]
+        xfrm = sppr.find(q("a:xfrm"))
+        rot = int(xfrm.get("rot", "0")) / 60000 if xfrm is not None else 0
+        prst, cust = sppr.find(q("a:prstGeom")), sppr.find(q("a:custGeom"))
+        geometry = prst.get("prst", "rect") if prst is not None else "custom" if cust is not None else "rect"
+        path = custom_path(cust, x, y, w, h) if cust is not None else None
+        if ln(el) == "cxnSp" and geometry not in LINE_GEOMETRIES:
+            geometry = "straightConnector1"
+        fill, stroke, width, dash, head, tail = read_fill_line(sppr, el.find(q("p:style")), geometry, self.theme)
+        nv = el.find(f".//{q('p:cNvPr')}")
+        cxn = el.find(f".//{q('p:cNvCxnSpPr')}")
+        ends = [cxn.find(q(t)) if cxn is not None else None for t in ("a:stCxn", "a:endCxn")]
+        sid = lambda v: f"s{n}:{v}" if v else None  # noqa: E731 (슬라이드마다 id가 1부터 다시 시작한다)
+        body = el.find(q("p:txBody"))
+        bpr = body.find(q("a:bodyPr")) if body is not None else None
+        return Shape(
+            id=sid(nv.get("id")) if nv is not None else None, name=nv.get("name") if nv is not None else None,
+            geometry=geometry, path=path, x=x, y=y, width=w, height=h, rotation=rot,
+            flip_h=xfrm is not None and xfrm.get("flipH") == "1", flip_v=xfrm is not None and xfrm.get("flipV") == "1",
+            fill=fill, stroke=stroke, stroke_width_pt=width, stroke_dash=dash, head_arrow=head, tail_arrow=tail,
+            connect_from=sid(ends[0].get("id")) if ends[0] is not None else None,
+            connect_to=sid(ends[1].get("id")) if ends[1] is not None else None,
+            text_v_align=_ANCHOR.get(bpr.get("anchor", "t") if bpr is not None else "t", "top"),
+        )
 
     def _paragraphs(self, body, n: int, box, bullets: bool) -> list[Paragraph]:
         out: list[Paragraph] = []
@@ -442,7 +568,7 @@ class PptxParser:
             # 슬라이드 번호와 같은 숫자만 '#'로 ('02 / 14'는 쪽 번호, '방법 1'·'방법 2'는 내용이라 서로 다른 글)
             x0, y0 = b.prov.bbox[0], b.prov.bbox[1]
             # 첫 번째만: 마지막 슬라이드의 '4 / 4'에서 전체 수까지 바꾸면 다른 슬라이드의 '# / 4'와 달라진다
-            text = re.sub(rf"(?<!\d)0*{b.prov.page}(?!\d)", "#", " ".join(b.text.split()), count=1)
+            text = re.sub(rf"(?<!\d)0*{b.prov.page}(?!\d)", "#", " ".join(_text_of(b).split()), count=1)
             return text, round(x0 / 5), round(y0 / 5)
 
         height = self.doc.page.height_pt if self.doc.page else 540.0
@@ -450,8 +576,10 @@ class PptxParser:
         def at_edge(b) -> bool:
             return b.prov.bbox[1] < height * 0.12 or b.prov.bbox[3] > height * 0.88
 
-        cands = [b for b in self.doc.blocks if isinstance(b, Paragraph) and b.prov and b.prov.bbox and b.text.strip()
-                 and at_edge(b)]
+        def movable(b) -> bool:  # 문단, 또는 슬라이드마다 같은 자리에 놓인 도식(범례 등)
+            return isinstance(b, (Paragraph, Drawing)) and b.prov and b.prov.bbox and _text_of(b).strip() and at_edge(b)
+
+        cands = [b for b in self.doc.blocks if movable(b)]
         pages: Counter = Counter()
         seen = set()
         for b in cands:
@@ -465,7 +593,7 @@ class PptxParser:
         kept: dict = {}
         out = []
         for b in self.doc.blocks:
-            if isinstance(b, Paragraph) and b.prov and b.prov.bbox and b.text.strip() and at_edge(b) and key(b) in repeated:
+            if movable(b) and key(b) in repeated:
                 k = key(b)
                 if k not in kept and not re.fullmatch(r"[#\d\s/|\-·.]*", k[0]):  # 쪽 번호('3', '3 / 14')만이면 버린다
                     kept[k] = b
@@ -523,6 +651,32 @@ class PptxParser:
                 p.style_name = "slide_notes"
                 out.append(p)
         return out
+
+
+def _text_of(b) -> str:
+    """문단 글, 또는 도식 안 글상자 글을 이은 것."""
+    if isinstance(b, Drawing):
+        return " ".join(x.text for s in b.shapes for x in s.text_blocks if hasattr(x, "text"))
+    return b.text
+
+
+def _extent(members) -> tuple[float, float, float, float]:
+    """(요소, Shape) 목록의 전체 범위."""
+    return (min(s.x for _, s in members), min(s.y for _, s in members),
+            max(s.x + s.width for _, s in members), max(s.y + s.height for _, s in members))
+
+
+def _stacked(a: Shape, b: Shape) -> bool:
+    """a가 b 바로 위나 아래에 같은 너비·같은 왼쪽 위치로 쌓인 상자인가 (틈은 b 높이 이하)."""
+    if abs(a.x - b.x) > 2 or abs(a.width - b.width) > 2:
+        return False
+    gap = a.y - (b.y + b.height) if a.y >= b.y else b.y - (a.y + a.height)
+    return -1 <= gap <= max(b.height, 4)
+
+
+def _has_text(el) -> bool:
+    body = el.find(q("p:txBody"))
+    return body is not None and any((t.text or "").strip() for t in body.iter(q("a:t")))
 
 
 def xy_order(items: list) -> list:

@@ -149,7 +149,7 @@ class ShapeReader:
             return prst.get("prst", "rect"), None, False
         cust = sppr.find(q("a:custGeom"))
         if cust is not None:
-            return "custom", _custom_path(cust, x, y, w, h), False
+            return "custom", custom_path(cust, x, y, w, h), False
         return "rect", None, False
 
     def _xfrm(self, sppr, ox, oy, sx, sy):
@@ -173,34 +173,7 @@ class ShapeReader:
             return None
         x, y, w, h, rot, fh, fv = geo
         geometry, path, approx = self._geometry(sppr, x, y, w, h, sx, sy)
-        style = el.find(q("wps:style"))
-
-        fill = None
-        if sppr.find(q("a:noFill")) is None:
-            fill = read_color(sppr.find(q("a:solidFill")), self.theme)
-            if fill is None and sppr.find(q("a:gradFill")) is not None:
-                # 그라데이션은 첫 색으로 근사
-                gs = sppr.find(f".//{q('a:gs')}")
-                fill = read_color(gs, self.theme)
-            if fill is None and style is not None and geometry not in ("line", "straightConnector1") and "Connector" not in geometry:
-                fill = read_color(style.find(q("a:fillRef")), self.theme)
-
-        ln = sppr.find(q("a:ln"))
-        stroke, width, dash, head, tail = None, 0.75, "solid", False, False
-        no_line = ln is not None and ln.find(q("a:noFill")) is not None
-        if not no_line:
-            stroke = read_color(ln.find(q("a:solidFill")), self.theme) if ln is not None else None
-            if stroke is None and style is not None:
-                stroke = read_color(style.find(q("a:lnRef")), self.theme)
-            if ln is not None:
-                if ln.get("w"):
-                    width = max(_emu(ln.get("w")), 0.25)
-                pd = ln.find(q("a:prstDash"))
-                if pd is not None:
-                    dash = _DASH.get(pd.get("val", ""), "solid")
-                he, te = ln.find(q("a:headEnd")), ln.find(q("a:tailEnd"))
-                head = he is not None and he.get("type", "none") != "none"
-                tail = te is not None and te.get("type", "none") != "none"
+        fill, stroke, width, dash, head, tail = read_fill_line(sppr, el.find(q("wps:style")), geometry, self.theme)
 
         nv = el.find(q("wps:cNvPr"))
         cxn = el.find(q("wps:cNvCnPr"))
@@ -239,11 +212,45 @@ class ShapeReader:
                      flip_h=fh, flip_v=fv, image_id=image_id)
 
 
+def read_fill_line(sppr, style, geometry: str, theme: Theme):
+    """spPr(+ 도형 스타일 참조)의 채우기와 선: (채우기, 선 색, 선 굵기 pt, 선 모양, 시작 화살표, 끝 화살표).
+
+    DOCX(wps:spPr)와 PPTX(p:spPr)가 같은 DrawingML이라 함께 쓴다. 스타일 참조(fillRef, lnRef)는 직접 값이 없을 때만.
+    """
+    fill = None
+    if sppr.find(q("a:noFill")) is None:
+        fill = read_color(sppr.find(q("a:solidFill")), theme)
+        if fill is None and sppr.find(q("a:gradFill")) is not None:
+            # 그라데이션은 첫 색으로 근사
+            gs = sppr.find(f".//{q('a:gs')}")
+            fill = read_color(gs, theme)
+        if fill is None and style is not None and geometry not in ("line", "straightConnector1") and "Connector" not in geometry:
+            fill = read_color(style.find(q("a:fillRef")), theme)
+
+    ln = sppr.find(q("a:ln"))
+    stroke, width, dash, head, tail = None, 0.75, "solid", False, False
+    no_line = ln is not None and ln.find(q("a:noFill")) is not None
+    if not no_line:
+        stroke = read_color(ln.find(q("a:solidFill")), theme) if ln is not None else None
+        if stroke is None and style is not None:
+            stroke = read_color(style.find(q("a:lnRef")), theme)
+        if ln is not None:
+            if ln.get("w"):
+                width = max(_emu(ln.get("w")), 0.25)
+            pd = ln.find(q("a:prstDash"))
+            if pd is not None:
+                dash = _DASH.get(pd.get("val", ""), "solid")
+            he, te = ln.find(q("a:headEnd")), ln.find(q("a:tailEnd"))
+            head = he is not None and he.get("type", "none") != "none"
+            tail = te is not None and te.get("type", "none") != "none"
+    return fill, stroke, width, dash, head, tail
+
+
 def _emu(v) -> float:
     return emu_to_pt(v) or 0.0
 
 
-def _custom_path(cust, x, y, w, h) -> str | None:
+def custom_path(cust, x, y, w, h) -> str | None:
     """a:custGeom → SVG path. 경로 좌표계(w, h)를 도형 상자에 맞춰 늘린다."""
     parts = []
     for path in cust.findall(f"{q('a:pathLst')}/{q('a:path')}"):
