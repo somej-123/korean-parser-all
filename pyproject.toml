@@ -19,7 +19,7 @@ dependencies = [
 
 [project.optional-dependencies]
 docling = ["docling>=2.50"]
-pdf = ["docling>=2.50", "pypdfium2>=4", "pillow>=10"]
+pdf = ["docling>=2.50", "pypdfium2>=4", "pillow>=10", "onnxruntime>=1.17"]  # onnxruntime: 스캔 PDF OCR(RapidOCR)
 dev = [
     "pytest>=8",
     "python-docx>=1.1",  # tests/fixtures 생성

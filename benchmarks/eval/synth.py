@@ -195,11 +195,24 @@ def write_table(doc, spec: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _soffice() -> str:
+    """LibreOffice 실행 파일. Windows는 설치해도 PATH에 넣지 않으므로 기본 설치 폴더도 본다."""
+    found = shutil.which("soffice")
+    if found:
+        return found
+    for base in ("C:/Program Files/LibreOffice", "C:/Program Files (x86)/LibreOffice"):
+        exe = Path(base) / "program" / "soffice.exe"
+        if exe.exists():
+            return str(exe)
+    raise SystemExit("LibreOffice(soffice)가 필요합니다")
+
+
 def to_pdf(docx_files: list[Path], out: Path) -> None:
-    if not shutil.which("soffice"):
-        raise SystemExit("LibreOffice(soffice)가 필요합니다")
+    soffice = _soffice()
     with tempfile.TemporaryDirectory() as profile:
-        subprocess.run(["soffice", f"-env:UserInstallation=file://{profile}", "--headless", "--convert-to", "pdf",
+        # 프로필 위치는 file URL로 넘긴다. Windows 경로를 'file://'에 그대로 붙이면 잘못된 주소가 되어
+        # LibreOffice가 'bootstrap.ini가 손상되었다'는 창을 띄우고 멈춘다
+        subprocess.run([soffice, f"-env:UserInstallation={Path(profile).as_uri()}", "--headless", "--convert-to", "pdf",
                         "--outdir", str(out), *map(str, docx_files)], check=True, capture_output=True)
 
 
