@@ -87,6 +87,42 @@ def _side_by_side(blocks) -> bool:
     return False
 
 
+def _band_order(blocks, page_height: float) -> list | None:
+    """세로로 겹치는 블록끼리 띠로 묶어, 띠는 위에서 아래로, 띠 안에서는 왼쪽 단부터(단 안은 위에서 아래로) 읽는 순서.
+
+    신청서 양식은 왼쪽 띠의 구역 이름('신청고객정보')과 오른쪽 표가 나란히 놓인 줄이 위아래로 이어진다. Docling은
+    왼쪽 이름들을 먼저 다 읽고 오른쪽으로 넘어가서, 이름이 자기 표와 떨어지고 표 사이 안내문이 쪽 끝으로 밀렸다.
+    진짜 다단 문서는 단끼리 세로로 계속 겹쳐 띠 하나가 쪽 대부분을 차지하므로, 띠가 모두 쪽 높이의 1/4보다 낮을 때만
+    이 순서를 쓴다 (아니면 None).
+    """
+    order = sorted(blocks, key=lambda b: b.prov.bbox[1])
+    bands: list[list] = []
+    bottom = None
+    for b in order:
+        y0, y1 = b.prov.bbox[1], b.prov.bbox[3]
+        if bands and y0 < bottom - 2:  # 띠의 아래 끝보다 위에서 시작하면 같은 띠
+            bands[-1].append(b)
+            bottom = max(bottom, y1)
+        else:
+            bands.append([b])
+            bottom = y1
+    if any(max(b.prov.bbox[3] for b in band) - min(b.prov.bbox[1] for b in band) > page_height / 4 for band in bands):
+        return None
+    out = []
+    for band in bands:
+        cols: list[list] = []  # 가로로 겹치는 블록끼리 한 단
+        for b in sorted(band, key=lambda b: b.prov.bbox[0]):
+            x0, x1 = b.prov.bbox[0], b.prov.bbox[2]
+            col = next((c for c in cols if any(min(x1, o.prov.bbox[2]) - max(x0, o.prov.bbox[0]) > 2 for o in c)), None)
+            if col is None:
+                cols.append([b])
+            else:
+                col.append(b)
+        for col in cols:
+            out.extend(sorted(col, key=lambda b: b.prov.bbox[1]))
+    return out
+
+
 def _row_texts(row) -> list[str]:
     return [" ".join(getattr(x, "text", "") for x in c.blocks).strip() for c in row.cells]
 
@@ -476,7 +512,8 @@ class PdfParser:
         return re.sub(r" {2,}", " ", out).strip()
 
     def _resolve_gaps(self, text: str) -> str:
-        """한글-영문 사이의 애매한 간격을 형태소 분석으로 정한다 ('2026년', 'OCR이'는 붙이고 'PDF 기준'은 띄운다)."""
+        """애매한 간격을 형태소 분석으로 정한다. 한글-영문 사이('2026년', 'OCR이'는 붙이고 'PDF 기준'은 띄운다)와
+        좁은 글꼴의 한글-한글 사이('해지정산 내역 및 동의내역')."""
         if AMBIGUOUS_GAP not in text:
             return text
         parts = text.split(AMBIGUOUS_GAP)
@@ -486,7 +523,9 @@ class PdfParser:
                 out += part
                 continue
             lw = out.split()[-1] if out.split() else ""
-            if is_hangul_syllable(out[-1:]) and lw != "제":
+            if is_hangul_syllable(out[-1:]) and is_hangul_syllable(part[:1]):
+                out += (" " if self._space_at_join(out, part) else "") + part  # 좁은 글꼴의 낱말 사이 (`_narrow_spaces`)
+            elif is_hangul_syllable(out[-1:]) and lw != "제":
                 # 한글 뒤에 오는 숫자·영문은 거의 언제나 새 어절이다 ('시 30분', '산출물은 HWPX와'). '제3조'만 예외
                 out += " " + part
             else:  # 숫자·영문 뒤의 한글: 단위·조사면 붙이고('30분', 'OCR이'), 낱말이면 띄운다('PDF 기준')
@@ -658,7 +697,9 @@ class PdfParser:
         """한 단(段)으로 된 쪽은 블록을 위에서 아래 순서로 놓는다.
 
         Docling 읽기 순서가 가끔 쪽 위의 표·주석을 아래 문단 뒤에 둔다. 쪽 안에서 나란히 놓인 블록(다단, 옆으로
-        놓인 그림과 글)이 하나도 없으면 위치 순서가 곧 읽기 순서이므로 세로 위치로 다시 정렬한다. 다단 쪽은 그대로 둔다.
+        놓인 그림과 글)이 하나도 없으면 위치 순서가 곧 읽기 순서이므로 세로 위치로 다시 정렬한다. 나란히 놓인 블록이
+        낮은 띠로만 있는 쪽(왼쪽 구역 이름 + 오른쪽 표가 줄줄이 놓인 신청서 양식)은 띠 순서로 읽는다 (`_band_order`).
+        그 밖의 다단 쪽은 그대로 둔다.
         쪽 순서도 바로잡는다: Docling이 쪽 맨 아래 표를 다음 쪽 앞부분 뒤에 두는 경우가 있었다 (정답 세트 synth_11).
         """
         pages: dict[int, list[Block]] = {}
@@ -676,6 +717,8 @@ class PdfParser:
             located = [b for b in page if b.prov and b.prov.bbox]
             if len(located) == len(page) and not _side_by_side(located):
                 page.sort(key=lambda b: b.prov.bbox[1])
+            elif len(located) == len(page) and n is not None:
+                page[:] = _band_order(page, self.pages.page(n).height) or page
             if i:
                 out.append(breaks.get(n) or PageBreak(id=self._new_id(), prov=self._prov(n, None)))
             out.extend(page)

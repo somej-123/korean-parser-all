@@ -169,7 +169,7 @@ class PageInfo:
         PDF에 실제로 있는 공백 글자는 그대로 두고, pdfium이 끼워 넣은 공백은 글자 사이에 실제 간격이 있을 때만
         쓴다. 글꼴이 바뀌는 자리("2026" + "년")에 끼워 넣은 폭 0짜리 공백은 버린다.
         줄 끝의 공백은 남겨 둔다 (줄을 합칠 때 어절 경계 표시로 쓴다).
-        한글과 영문·숫자 사이의 좁은 간격은 AMBIGUOUS_GAP으로 표시한다.
+        한글과 영문·숫자 사이의 좁은 간격, 좁은 글꼴의 좁은 낱말 사이(`_narrow_spaces`)는 AMBIGUOUS_GAP으로 표시한다.
         """
         chars = [c for c in _dedupe_overlaps(self.chars_in(box, pad)) if not (c.text.isspace() and c.generated)]
         if not chars:
@@ -188,12 +188,15 @@ class PageInfo:
         for line in lines_of:
             line.sort(key=lambda c: c.origin[0])
             right = _right_edges(line)
+            narrow = _narrow_spaces(line, right)
             cur = ""
             for i, c in enumerate(line):
                 if i:
                     p = line[i - 1]
                     size = max(p.size, c.size, 1.0)
-                    if not c.text.isspace() and not p.text.isspace() and c.origin[0] - right[i - 1] > size * 0.15:
+                    if i in narrow:
+                        cur += AMBIGUOUS_GAP
+                    elif not c.text.isspace() and not p.text.isspace() and c.origin[0] - right[i - 1] > size * 0.15:
                         # 공백 글자 없이 위치로 띄운 단어 사이. 한글과 영문·숫자 사이의 좁은 간격은 조판 프로그램이
                         # 자동으로 넣는 '한글-영문 간격'일 수 있어(2026년, OCR이) 판단을 미룬다 (AMBIGUOUS_GAP)
                         mixed = _is_hangul(p.text) != _is_hangul(c.text) and p.text.isalnum() and c.text.isalnum()
@@ -483,6 +486,30 @@ def _obj_text(obj, textpage) -> str:
     buf = ctypes.create_string_buffer(n)
     raw.FPDFTextObj_GetText(obj.raw, textpage.raw, ctypes.cast(buf, ctypes.POINTER(raw.FPDF_WCHAR)), n)
     return buf.raw[: n - 2].decode("utf-16-le", "ignore")
+
+
+def _narrow_spaces(line: list, right: list[float]) -> set[int]:
+    """좁은 글꼴의 낱말 사이로 보이는 한글-한글 자리 (그 뒤 글자의 위치 모음).
+
+    장평을 줄인 글꼴은 공백 폭도 좁다: 양식의 '해지정산 내역 및 동의내역'은 낱말 사이가 글자 크기의 0.11배,
+    낱말 안은 0 이하였다 (보통 기준 0.15배로는 공백이 아니다). 줄 안의 다른 한글-한글 빈칸이 모두 거의 0(0.03배 이하)이고
+    이 빈칸만 0.08~0.15배로 뚜렷하게 넓을 때만 고르고, 띄울지는 형태소 분석이 정한다. 거의 0인 낱말 안 빈칸이 고른
+    자리보다 두 배 이상 많아야 한다: 글자 사이를 고르게 벌린 줄(한남대 공고, 낱말 안 빈칸 0.10~0.11배)은 고르지 않는다.
+    """
+    cand, tight, loose = set(), 0, False
+    for i in range(1, len(line)):
+        p, c = line[i - 1], line[i]
+        if not (_is_hangul(p.text) and _is_hangul(c.text)):
+            continue
+        size = max(p.size, c.size, 1.0)
+        gap = c.origin[0] - right[i - 1]
+        if gap <= size * 0.03:
+            tight += 1
+        elif gap < size * 0.08:
+            loose = True
+        elif gap <= size * 0.15:
+            cand.add(i)
+    return cand if cand and not loose and tight >= 2 * len(cand) else set()
 
 
 def _right_edges(chars: list[Char]) -> list[float]:

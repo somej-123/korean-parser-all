@@ -69,3 +69,38 @@ def test_ink_box_keeps_wide_letter_together():
              c("P", (245.0, 640.4, 250.89, 646.49), 244.32, 7.04), c(")", (248.69, 639.69, 253.4, 647.49), 249.12, 4.63)]
     page = PageInfo(number=1, width=600, height=800, chars=chars)
     assert page.text_lines((200, 630, 300, 650)) == ["트(MVP)"]
+
+
+def test_narrow_word_gaps_of_condensed_label():
+    # 신청서 양식의 장평 줄인 이름표 '해지정산 내역 및 동의내역': 낱말 안 빈칸은 0, 낱말 사이는 글자 크기의 0.11배.
+    # 그 자리만 '애매한 간격'으로 고른다. 글자 사이를 고르게 벌린 줄(모든 빈칸이 0.1배)은 고르지 않는다
+    from korean_parser.parsers.pdf.page import _narrow_spaces, _right_edges
+
+    def line(words, inner, between, size=8.0):
+        out, x = [], 0.0
+        for w in words:
+            for c in w:
+                out.append(ch(c, x, size=size, advance=6.0))
+                x += 6.0 + inner * size
+            x += (between - inner) * size
+        return out
+
+    label = line(["해지정산", "내역", "및", "동의내역"], 0.0, 0.11)
+    assert _narrow_spaces(label, _right_edges(label)) == {4, 6, 7}
+    tracked = line(["반드시", "열람하고", "숙지하여야"], 0.11, 0.87)
+    assert _narrow_spaces(tracked, _right_edges(tracked)) == set()
+
+
+def test_band_order_for_form_rows():
+    # 왼쪽 구역 이름 + 오른쪽 표가 줄줄이 놓인 양식: 띠마다 이름 → 표. 진짜 2단 쪽(띠가 쪽 높이의 1/4보다 큼)은 그대로
+    from korean_parser.ir import Paragraph, Provenance, Text
+    from korean_parser.parsers.pdf import _band_order
+
+    def blk(name, box):
+        return Paragraph(id=name, prov=Provenance(parser="t", page=1, bbox=box), inlines=[Text(text=name)])
+
+    docling = [blk("신청고객정보", (40, 93, 82, 98)), blk("해지사유", (40, 175, 68, 180)),
+               blk("안내문", (139, 74, 324, 80)), blk("표1", (130, 87, 560, 159)), blk("표2", (130, 169, 560, 234))]
+    assert [b.id for b in _band_order(docling, 842)] == ["안내문", "신청고객정보", "표1", "해지사유", "표2"]
+    columns = [blk("왼쪽", (50, 100, 280, 700)), blk("오른쪽", (300, 100, 540, 700))]
+    assert _band_order(columns, 842) is None

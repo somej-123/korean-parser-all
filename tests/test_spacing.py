@@ -71,6 +71,12 @@ def test_join_lines_word_boundary_break(fixer):
     assert fixer.join_lines(lines) == "본 문서는 2026년도 사업 추진 방향을 설명합니다."
 
 
+def test_join_lines_single_syllable_noun(fixer):
+    # 줄 끝의 '후'는 일반 명사지만 혼자 쓰는 말이다. 한 글자 조각을 되돌리는 보호 규칙에 걸려 '후파기합니다'가 되었다
+    assert fixer.join_lines(["6개월간 보관 후", "파기합니다."]) == "6개월간 보관 후 파기합니다."
+    assert fixer.join_lines(["업무 처리 후", "꼭 돌려받으시기 바랍니다."]) == "업무 처리 후 꼭 돌려받으시기 바랍니다."
+
+
 def test_join_lines_english_hyphen(fixer):
     assert fixer.join_lines(["document infor-", "mation 추출"]) == "document information 추출"
 

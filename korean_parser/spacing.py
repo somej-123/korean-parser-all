@@ -32,6 +32,8 @@ _NO_SPACE_BEFORE_TAGS = ("J", "E", "XS", "VCP", "VCN")
 # 한 글자로 혼자 띄어 써도 자연스러운 품사: 관형사(본, 각), 부사(더, 잘), 접속부사(및),
 # 의존명사(수, 것, 등), 대명사, 수사, 감탄사
 _STANDALONE_SINGLE_TAGS = ("MM", "MAG", "MAJ", "NNB", "NP", "NR", "IC")
+# 일반 명사지만 한 글자로 혼자 쓰는 일이 흔한 말 ('보관 후 파기합니다', '처리 후 꼭', '진행 중')
+_STANDALONE_SINGLE_NOUNS = set("후전중때뒤앞밖끝")
 
 # 정상적인 한국어 문서의 어절은 대부분 6음절 이하다.
 _LONG_EOJEOL = 7
@@ -270,6 +272,8 @@ def _merge_single_fragments(
             if end - start != 1 or not is_hangul_syllable(stripped[start]):
                 continue
             if tag_at.get(start, "").startswith(_STANDALONE_SINGLE_TAGS):
+                continue
+            if stripped[start] in _STANDALONE_SINGLE_NOUNS and tag_at.get(start, "").startswith("NNG"):
                 continue
             # 뒤쪽 공백이 새로 넣은 것이면 뒤와 붙이고, 아니면 앞쪽을 확인한다.
             for pos in (end, start):
