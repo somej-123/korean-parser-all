@@ -76,3 +76,15 @@ def test_pdf_keeps_text_layer(path):
         if isinstance(t, Table):
             cells = " ".join(p.text for r in t.rows for c in r.cells for p in c.blocks if hasattr(p, "text"))
             assert cells.count("·····") < 3, cells[:80]
+
+
+OTHER = sorted(p for ext in ("*.docx", "*.hwpx", "*.pptx", "*.xlsx") for p in FOLDER.glob(ext))
+
+
+@pytest.mark.skipif(not OTHER, reason="samples_rfp/에 DOCX·HWPX·PPTX·XLSX 없음")
+@pytest.mark.parametrize("path", OTHER, ids=_name)
+def test_other_formats_open(path):
+    from korean_parser.render.html import render_html
+
+    doc = parse(path)
+    assert doc.blocks and render_html(doc)

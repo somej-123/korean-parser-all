@@ -68,7 +68,8 @@ ARCHITECTURE의 'OCR 띄어쓰기'). OCR이 빠뜨린 ○ □ 기호도 모양�
 - HWPX: 문단 중간에 놓인 글상자 글이 문단 앞에 나온다 (미리보기와 순서 차이).
 - PDF 표: 점선·선 굵기를 실선으로 그림. 굵은 글꼴 정보가 없는 PDF의 머리 행 굵게.
 - (v0.10.1 완료) 스캔 PDF 제목 단계: 번호 종류 순서로 (0.572 → 1.000).
-- 5단계: PPTX, XLSX 파서. Office 2016 신형 차트(chartex).
+- (v0.11 완료) PPTX·XLSX 파서. 남은 것: 슬라이드 원래 배치(fixed) 화면, 글 없는 도형 그리기, XLSX 차트·그림,
+  Office 2016 신형 차트(chartex). 실제 PPTX·XLSX 문서로는 아직 확인하지 못했다 (samples_rfp/에 넣으면 test_real_samples가 연다).
 - (v0.10 완료) EMF·WMF·TIFF 그림 → PNG (`images.py`). Linux 서버에서는 LibreOffice가 있어야 메타파일을 바꾼다.
 - HWP 5.0 (v0.8 완료): 그리기 개체(사각형·타원·호·선·다각형·곡선·연결선·묶음, 글상자)는 SHAPE_COMPONENT 레코드를
   HWPX `ShapeReader`가 읽는 XML로 옮겨 SVG로 그린다 (2026-10-16). 제안요청서 '붙임. 3.' 세 문서의 글상자(둥근 사각형)가

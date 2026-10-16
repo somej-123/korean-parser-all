@@ -25,6 +25,8 @@ pdf = ["docling>=2.50", "pypdfium2>=4", "pillow>=10", "onnxruntime>=1.17"]  # on
 dev = [
     "pytest>=8",
     "python-docx>=1.1",  # tests/fixtures 생성
+    "python-pptx>=1.0",  # tests/fixtures/make_office.py
+    "openpyxl>=3.1",  # tests/fixtures/make_office.py
     "pillow>=10",
 ]
 visual = ["playwright>=1.40", "pypdfium2>=4", "pillow>=10"]

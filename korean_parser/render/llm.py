@@ -76,7 +76,8 @@ class LlmRenderer:
         if isinstance(b, Chart):
             return self._chart(b)
         if isinstance(b, Figure):
-            head = f"[그림{': ' + b.caption if b.caption else ''}]{self._tag(b)}"
+            label = b.caption or b.alt  # 설명(캡션)이 없으면 원본의 대체 텍스트
+            head = f"[그림{': ' + label if label else ''}]{self._tag(b)}"
             return head + (f"\n그림 안 글자: {b.inner_text}" if b.inner_text else "")
         if isinstance(b, PageBreak):
             return ""

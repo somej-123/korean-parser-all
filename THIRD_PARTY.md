@@ -44,6 +44,8 @@ Docling은 이 밖에도 Hugging Face transformers·huggingface-hub(Apache-2.0),
 |---|---|---|
 | [pytest](https://pytest.org) 9.1 | 시험 | MIT |
 | [python-docx](https://github.com/python-openxml/python-docx) 1.2 | 시험용 DOCX·평가용 합성 문서 만들기 | MIT |
+| [python-pptx](https://github.com/scanny/python-pptx) 1.0 | 시험용 PPTX 만들기 (`make_office.py`) | MIT |
+| [openpyxl](https://foss.heptapod.net/openpyxl/openpyxl) 3.1 | 시험용 XLSX 만들기 (`make_office.py`) | MIT |
 | [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) 3.14 | 평가: 글자 오류율·블록 짝짓기 | MIT |
 | [APTED](https://github.com/JoaoFelipe/apted) 1.0 | 평가: 표 TEDS의 트리 편집 거리 | MIT |
 | [Playwright](https://github.com/microsoft/playwright-python) 1.64 (Chromium) | 화면 비교: HTML을 그림으로 | Apache-2.0 |

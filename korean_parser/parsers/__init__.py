@@ -38,6 +38,18 @@ def _hwp(path: Path) -> Document:
         raise DocumentError(str(exc)) from exc
 
 
+def _pptx(path: Path) -> Document:
+    from .pptx import parse_pptx
+
+    return parse_pptx(path)
+
+
+def _xlsx(path: Path) -> Document:
+    from .xlsx import parse_xlsx
+
+    return parse_xlsx(path)
+
+
 def _pdf(path: Path) -> Document:
     from .pdf import PdfEngineMissing, parse_pdf
 
@@ -52,6 +64,8 @@ _PARSERS = {
     "hwp": _hwp,
     "hwpx": _hwpx,
     "pdf": _pdf,
+    "pptx": _pptx,
+    "xlsx": _xlsx,
 }
 
 
@@ -75,6 +89,10 @@ def detect_format(path: Path) -> str | None:
             return "docx"
         if "Contents/content.hpf" in names:
             return "hwpx"
+        if "ppt/presentation.xml" in names:
+            return "pptx"
+        if "xl/workbook.xml" in names:
+            return "xlsx"
     if head.startswith(b"%PDF"):
         return "pdf"
     return None
