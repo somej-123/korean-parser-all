@@ -111,6 +111,7 @@ class Grid:
     xs: list[float]
     ys: list[float]
     cells: list[GridCell]
+    source: str = "rules"  # rules: 괘선으로 읽음, text: 글 위치로 정함 (위아래 선만 있는 표, open_table.py)
 
     @property
     def n_rows(self) -> int:

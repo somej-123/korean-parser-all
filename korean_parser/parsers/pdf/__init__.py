@@ -25,6 +25,7 @@ from ...ir import (
 from ...normalize import is_hangul_syllable, normalize_text
 from ...outline import match_marker
 from .rules import build_grid, rule_regions
+from .open_table import text_grid
 from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, inside_ratio, intersect, union
 
 PARSER_NAME = "pdf-docling"
@@ -631,25 +632,26 @@ class PdfParser:
 
         Docling 읽기 순서가 가끔 쪽 위의 표·주석을 아래 문단 뒤에 둔다. 쪽 안에서 나란히 놓인 블록(다단, 옆으로
         놓인 그림과 글)이 하나도 없으면 위치 순서가 곧 읽기 순서이므로 세로 위치로 다시 정렬한다. 다단 쪽은 그대로 둔다.
+        쪽 순서도 바로잡는다: Docling이 쪽 맨 아래 표를 다음 쪽 앞부분 뒤에 두는 경우가 있었다 (정답 세트 synth_11).
         """
-        blocks = self.doc.blocks
+        pages: dict[int, list[Block]] = {}
+        breaks: dict[int, PageBreak] = {}
+        cur = None
+        for b in self.doc.blocks:
+            if isinstance(b, PageBreak):
+                breaks.setdefault(b.prov.page, b)  # 쪽 나눔 블록은 그 id를 그대로 다시 쓴다
+                continue
+            cur = b.prov.page if b.prov else cur
+            pages.setdefault(cur, []).append(b)
         out: list[Block] = []
-        page: list[Block] = []
-
-        def flush():
+        for i, n in enumerate(sorted(pages, key=lambda n: (n is None, n or 0))):
+            page = pages[n]
             located = [b for b in page if b.prov and b.prov.bbox]
             if len(located) == len(page) and not _side_by_side(located):
                 page.sort(key=lambda b: b.prov.bbox[1])
+            if i:
+                out.append(breaks.get(n) or PageBreak(id=self._new_id(), prov=self._prov(n, None)))
             out.extend(page)
-            page.clear()
-
-        for b in blocks:
-            if isinstance(b, PageBreak):
-                flush()
-                out.append(b)
-            else:
-                page.append(b)
-        flush()
         self.doc.blocks = out
 
     def _merge_split_tables(self) -> None:
@@ -875,7 +877,10 @@ class PdfParser:
             grid = build_grid(page.rules, box)
             rows = item.data.num_rows if self.ocr else None  # 표 구조 모델을 돌리지 않았으면 행 수를 모른다
             if grid is None or not self._grid_fits(grid, page, box, rows):
-                continue
+                # 세로선 없이 위아래(와 머리 행 아래)에만 가로선이 있는 '열린 표': 글 위치로 행·열을 정한다
+                grid = text_grid(page.chars, page.rules, box)
+                if grid is None or not self._covers_text(grid, page, box):
+                    continue
             gbox = (grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1])
             seen = self._ruled_boxes.setdefault(prov.page_no, [])
             if any(inside_ratio(gbox, expand(b, 2)) > 0.9 for b in seen):
@@ -884,6 +889,49 @@ class PdfParser:
             seen.append(gbox)
             self._ruled[item.self_ref] = grid
         self._find_missed_grids(ddoc)
+        self._find_open_continuations(ddoc)
+
+    def _find_open_continuations(self, ddoc) -> None:
+        """쪽을 넘어간 열린 표의 나머지를 찾는다.
+
+        열린 표는 다음 쪽 나머지에 세로선도 머리 행도 없어 Docling이 표로 찾지 못한다. 앞 쪽의 마지막 본문 블록이 글 위치로
+        읽은 표이고, 다음 쪽의 첫 본문 블록 자리에 같은 가로 범위의 가로선 두 개가 있으면, 앞 표의 열 경계로 그 사이를 읽는다.
+        쪽을 넘어간 표 잇기(`_merge_split_tables`)가 열 너비가 같은 두 표를 하나로 합친다.
+        """
+        from docling_core.types.doc import ContentLayer, PictureItem, TableItem
+
+        body: dict[int, list[BBox]] = {}
+        taken: dict[int, list[BBox]] = {}
+        for item, _ in ddoc.iterate_items(included_content_layers={ContentLayer.BODY}):
+            if item.prov:
+                body.setdefault(item.prov[0].page_no, []).append(self._box(item.prov[0], ddoc))
+                if isinstance(item, (TableItem, PictureItem)):
+                    taken.setdefault(item.prov[0].page_no, []).append(self._box(item.prov[0], ddoc))
+        grids = []
+        for item, _ in ddoc.iterate_items():
+            g = self._ruled.get(getattr(item, "self_ref", None))
+            if isinstance(item, TableItem) and item.prov and not isinstance(g, str) and g is not None and g.source == "text":
+                grids.append((item.prov[0].page_no, g))
+        for n, grid in grids:
+            if n >= len(self.pages):
+                continue
+            if any(b[1] > grid.ys[-1] + 2 for b in body.get(n, [])):
+                continue  # 표 아래에 다른 본문이 있다: 이 쪽에서 끝난 표
+            page = self.pages.page(n + 1)
+            left, right = grid.xs[0], grid.xs[-1]
+            hs = sorted(r.pos for r in page.rules
+                        if r.axis == "h" and abs(r.a - left) <= 3 and abs(r.b - right) <= 3)
+            hs = [y for i, y in enumerate(hs) if i == 0 or y - hs[i - 1] > 2]
+            if len(hs) < 2 or any(b[3] < hs[0] - 2 for b in body.get(n + 1, [])):
+                continue  # 다음 쪽 맨 위가 표가 아니다
+            region = (left, hs[0], right, hs[1])
+            if any(intersect(region, expand(b, 2)) for b in taken.get(n + 1, []) + self._ruled_boxes.get(n + 1, [])):
+                continue
+            rest = text_grid(page.chars, page.rules, region, columns=grid.xs)
+            if rest is None:
+                continue
+            self._ruled_boxes.setdefault(n + 1, []).append((left, hs[0], right, hs[1]))
+            self._extra_tables.append((n + 1, rest))
 
     def _find_missed_grids(self, ddoc) -> None:
         """Docling이 표로 찾지 못한 괘선 표를 선만으로 찾는다.
@@ -929,6 +977,11 @@ class PdfParser:
                     return False
             elif _rows_without_lines(grid, page):
                 return False
+        return PdfParser._covers_text(grid, page, box)
+
+    @staticmethod
+    def _covers_text(grid, page: PageInfo, box: BBox) -> bool:
+        """Docling 표 영역 글자의 90% 이상이 격자 안에 있는가 (격자가 표의 일부만 덮으면 글이 빠진다)."""
         gbox = expand((grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1]), 1)
         chars = [c for c in page.chars_in(box) if c.text.strip()]
         if not chars:
@@ -962,7 +1015,8 @@ class PdfParser:
 
     def _ruled_table(self, grid, page: PageInfo) -> Table:
         gbox = (grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1])
-        table = Table(id=self._new_id(), prov=self._prov(page.number, gbox, confidence=1.0),
+        # 글 위치로 정한 격자(열린 표)는 선으로 읽은 격자보다 덜 확실하다
+        table = Table(id=self._new_id(), prov=self._prov(page.number, gbox, confidence=1.0 if grid.source == "rules" else 0.8),
                       width_pt=round(gbox[2] - gbox[0], 1))
         line = Border(style="solid", width_pt=0.5, color="#000000")
         rows = [Row(height_pt=round(grid.ys[i + 1] - grid.ys[i], 1)) for i in range(grid.n_rows)]
