@@ -86,6 +86,38 @@ LLM 출력 예 ([`tests/fixtures/korean_report.docx`](tests/fixtures/)):
 
 `<!-- b12 -->`는 블록 id입니다. HTML의 `data-kp-id`와 같아서, LLM 답변의 근거를 화면에서 바로 강조할 수 있습니다.
 
+### 검색용 조각 (RAG)
+
+글자 수가 아니라 문서 구조로 자릅니다. 조각 크기는 쓰는 쪽(임베딩 모델, 검색 방식)에 맞춰 정합니다.
+
+```python
+from korean_parser.chunk import chunk
+
+for c in chunk(doc, max_tokens=500):                 # count_tokens=내 토크나이저 도 넘길 수 있음
+    vector_db.add(text=c.contextual_text(), metadata=c.metadata())
+```
+
+- **제목 경로**: 제목 스타일뿐 아니라, 한글 문서에서 흔한 '굵고 큰 번호 문단'(Ⅰ. 사업 개요 → 1. 제안개요 → ① …)도
+  장·절 제목으로 인식합니다. 목차 줄은 제외합니다. 같은 문서의 HWPX와 DOCX 변환본이 같은 경로를 냅니다.
+- **경계**: 장이 바뀌면 반드시 끊고, 작은 절은 같은 장 안에서 이웃과 합칩니다. 합친 조각의 경로는 공통 상위 제목입니다.
+- **표**: 통째로 둡니다. 상한을 넘는 표만 행 단위로 나누고, 머리 행과 세로 병합 칸('평가부문' 등)을 조각마다 복사해 문맥을 지킵니다.
+- **제목 상자·글상자**: 한 칸짜리 표, 배치용 표, 글상자 안의 글과 표는 본문처럼 풀어서 자릅니다.
+- **메타데이터**: 블록 id(HTML `data-kp-id`와 같음), 쪽 번호·좌표(PDF), 문서 정보, 조각 안에서 참조한 각주.
+
+예: 제안요청서 작성 예시의 10쪽짜리 평가표를 나눈 첫 조각 (`contextual_text()`)
+
+```text
+[Ⅵ. 제안안내 사항 > 2. 제안 평가 관련 사항]
+<table><tr><td>평가부문</td><td>평가항목</td><td>평가기준</td>...</tr><tr><td rowspan="4">전략<br>및<br>방법론<br>(15점)</td>...
+
+metadata(): {"chunk_id": "c31", "heading_path": ["Ⅵ. 제안안내 사항", "2. 제안 평가 관련 사항"], "block_ids": ["b1009"],
+             "kinds": ["table"], "tokens": 490, "doc_source_name": "rfp_example.hwpx", "doc_source_format": "hwpx", ...}
+```
+
+명령줄: `python -m korean_parser convert 문서.hwpx -o out/ --formats chunks --max-tokens 500` → `out/문서.chunks.jsonl`
+
+토큰 수는 기본으로 어림값(한글 음절당 1토큰)을 씁니다. 표 한 행의 칸 하나에 아주 긴 글이 든 경우가 아니면 상한을 넘지 않습니다.
+
 ## 구성
 
 | 경로 | 내용 |
@@ -93,6 +125,7 @@ LLM 출력 예 ([`tests/fixtures/korean_report.docx`](tests/fixtures/)):
 | [`korean_parser/ir.py`](korean_parser/ir.py) | 통합 문서 모델 |
 | [`korean_parser/parsers/`](korean_parser/parsers/) | 단일 입구 `parse()`와 형식별 파서 (DOCX, HWPX, PDF) |
 | [`korean_parser/render/`](korean_parser/render/) | HTML, LLM 텍스트, SVG(도형·차트) 렌더러 |
+| [`korean_parser/chunk.py`](korean_parser/chunk.py) | 구조 기반 청크 도구 (RAG용) |
 | [`korean_parser/enrich.py`](korean_parser/enrich.py) | 한국어 처리 레이어를 문서 모델에 적용 |
 | `korean_parser/normalize.py`, `spacing.py`, `outline.py` | 문자 정규화, 띄어쓰기 복원, 개조식 계층 인식 |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 설계와 단계별 계획 |

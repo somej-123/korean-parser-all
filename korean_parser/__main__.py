@@ -2,6 +2,7 @@
 
     python -m korean_parser convert 문서.docx -o out/
     python -m korean_parser convert 문서.docx -o out/ --formats html,llm,json
+    python -m korean_parser convert 문서.hwpx -o out/ --formats chunks --max-tokens 500
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+from .chunk import chunk
 from .parsers import parse, supported_formats
 from .render.html import render_html
 from .render.llm import render_llm
@@ -22,7 +24,9 @@ def main(argv=None) -> int:
     c = sub.add_parser("convert", help=f"문서를 HTML/LLM 텍스트/JSON으로 변환 (지원: {', '.join(supported_formats())})")
     c.add_argument("inputs", nargs="+", help="문서 파일")
     c.add_argument("-o", "--out", default="out", help="결과 폴더")
-    c.add_argument("--formats", default="html,llm,json", help="html, llm, json 중 쉼표로 구분")
+    c.add_argument("--formats", default="html,llm,json",
+                   help="html, llm, json, chunks(검색용 조각, JSON Lines) 중 쉼표로 구분")
+    c.add_argument("--max-tokens", type=int, default=500, help="chunks: 조각 하나의 토큰 상한 (어림값)")
     c.add_argument("--no-korean", action="store_true", help="한국어 처리 레이어 끄기")
     c.add_argument("--layout", choices=["auto", "flow", "fixed"], default="auto",
                    help="HTML 배치: auto(기본), flow(문서 흐름형), fixed(원본 쪽 모양, PDF만)")
@@ -47,6 +51,9 @@ def main(argv=None) -> int:
             stem.with_suffix(".llm.md").write_text(render_llm(doc), encoding="utf-8")
         if "json" in formats:
             stem.with_suffix(".json").write_text(doc.model_dump_json(indent=1, exclude_none=True), encoding="utf-8")
+        if "chunks" in formats:
+            lines = (c.model_dump_json(exclude_none=True) for c in chunk(doc, max_tokens=args.max_tokens))
+            stem.with_suffix(".chunks.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
         warn = f" (경고 {len(doc.warnings)}건)" if doc.warnings else ""
         print(f"완료  {src.name}  {time.perf_counter() - t0:.2f}s  블록 {len(doc.blocks)}개{warn}")
         for w in doc.warnings:

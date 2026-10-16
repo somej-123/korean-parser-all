@@ -112,17 +112,10 @@ class LlmRenderer:
     # ------------------------------------------------------------------
 
     def _table(self, t: Table) -> str:
-        # 한 열짜리 표는 제목 상자·강조 상자로 쓰인 경우가 대부분이다 (한글 문서에서 흔함). 글로 풀어 쓴다.
-        if t.rows and all(len(r.cells) == 1 for r in t.rows):
+        flat = self.flattened_cells(t)
+        if flat is not None:
             # 안쪽 문단이 각자 id를 달고 있으므로 표 id는 따로 달지 않는다
-            parts = (self.blocks(c.blocks) for r in t.rows for c in r.cells)
-            return "\n\n".join(p for p in parts if p.strip())
-
-        # 칸 대부분이 빈 표는 표지·로고 배치용 틀이다. 내용 있는 칸만 글로 풀어 쓴다.
-        cells = [c for r in t.rows for c in r.cells]
-        filled = [c for c in cells if self._plain(c.blocks).strip()]
-        if len(cells) >= 4 and (len(filled) <= 2 or len(filled) <= len(cells) * 0.25):
-            parts = (self.blocks(c.blocks) for c in filled)
+            parts = (self.blocks(c.blocks) for c in flat)
             return "\n\n".join(p for p in parts if p.strip())
 
         complex_cells = any(
@@ -140,6 +133,22 @@ class LlmRenderer:
         lines = ["| " + " | ".join(rows[0]) + " |", "|" + "---|" * width]
         lines += ["| " + " | ".join(r) + " |" for r in rows[1:]]
         return "\n".join(lines) + self._tag(t)
+
+    def flattened_cells(self, t: Table):
+        """표가 아닌 글로 풀어 쓸 표면 내용 있는 칸 목록, 아니면 None.
+
+        - 한 열짜리 표: 제목 상자·강조 상자로 쓰인 경우가 대부분이다 (한글 문서에서 흔함)
+        - 칸 대부분이 빈 표: 표지·로고 배치용 틀
+        """
+        if t.rows and all(len(r.cells) == 1 for r in t.rows):
+            return [c for r in t.rows for c in r.cells]
+        cells = [c for r in t.rows for c in r.cells]
+        filled = [c for c in cells if self._plain(c.blocks).strip()]
+        # 일정표(간트 차트)처럼 칸이 비는 게 정상인 표는 머리 행에 여러 칸이 차 있으므로 제외한다
+        one_per_row = all(sum(1 for c in r.cells if c in filled) <= 1 for r in t.rows)
+        if len(cells) >= 4 and (len(filled) <= 2 or (len(filled) <= len(cells) * 0.25 and one_per_row)):
+            return filled
+        return None
 
     def _html_table(self, t: Table) -> str:
         """병합 셀이나 셀 안 표가 있는 표. 셀 안의 표는 HTML 표로 중첩한다."""
@@ -162,7 +171,31 @@ class LlmRenderer:
             rows.append("<tr>" + "".join(cells) + "</tr>")
         return f"<table>{''.join(rows)}</table>"
 
+    def text_frame_blocks(self, d: Drawing):
+        """글 틀(글상자)로 쓰인 그리기 개체면 그 안의 블록(읽는 순서대로), 아니면 None.
+
+        ODT에서 변환한 DOCX나 한글 문서는 표·본문을 글상자 안에 넣는 경우가 많다. 도식으로 보고 한 줄로
+        뭉치면 표 구조가 사라지므로, 글상자 안 블록을 본문처럼 풀어 쓴다.
+        - 연결선이 없고 글상자가 하나뿐인 개체
+        - 연결선이 없고 글상자 중 하나라도 표나 문단 세 개 이상을 담은 개체 (도식의 짧은 이름표와 구별)
+        """
+        if any(s.is_line for s in d.shapes):
+            return None
+        boxes = [s for s in d.shapes if s.text_blocks]
+        if not boxes or any(s.image_id and s not in boxes for s in d.shapes):
+            return None
+        frame = len(boxes) == 1 or any(
+            len(s.text_blocks) >= 3 or any(isinstance(b, Table) for b in s.text_blocks) for s in boxes
+        )
+        if not frame:
+            return None
+        return [b for s in sorted(boxes, key=lambda s: (round(s.y), s.x)) for b in s.text_blocks]
+
     def _drawing(self, d: Drawing) -> str:
+        frame = self.text_frame_blocks(d)
+        if frame is not None:
+            body = self.blocks(frame)
+            return f"{body}{self._tag(d)}" if body and "\n" not in body else body
         boxes = [s for s in d.shapes if not s.is_line and (s.text_blocks or s.image_id)]
         lines = [s for s in d.shapes if s.is_line]
         names = {}
