@@ -145,6 +145,13 @@ def _ocr_clusters(result) -> dict[int, list]:
     return out
 
 
+def _is_toc(item) -> bool:
+    """Docling이 목차(document_index)로 본 표인가. 목차는 줄마다 '제목 ···· 쪽'인 글이라 행·열 표가 아니다."""
+    from docling_core.types.doc import DocItemLabel
+
+    return getattr(item, "label", None) == DocItemLabel.DOCUMENT_INDEX
+
+
 def _table_of(item, ddoc):
     """Docling 항목이 들어 있는 표 (부모를 따라 올라가 본다). 없으면 None."""
     from docling_core.types.doc import TableItem
@@ -401,7 +408,7 @@ class PdfParser:
         from docling_core.types.doc import TableItem
 
         pending = [it for it, _ in ddoc.iterate_items()
-                   if isinstance(it, TableItem) and it.prov and it.self_ref not in self._ruled]
+                   if isinstance(it, TableItem) and it.prov and it.self_ref not in self._ruled and not _is_toc(it)]
         if not pending:
             return {}
         pages = sorted({it.prov[0].page_no for it in pending})
@@ -535,6 +542,8 @@ class PdfParser:
                 self.doc.blocks.append(PageBreak(id=self._new_id(), prov=self._prov(page_no, None)))
             last_page = page_no
 
+            if isinstance(item, TableItem) and _is_toc(item) and item.self_ref not in self._ruled:
+                continue  # 목차: 표 대신 안의 줄(글 항목)이 차례로 문단이 된다
             if isinstance(item, TableItem):
                 self.doc.blocks.extend(self._table(item, page, box, ddoc))
                 for c in item.captions:
@@ -877,6 +886,8 @@ class PdfParser:
             grid = build_grid(page.rules, box)
             rows = item.data.num_rows if self.ocr else None  # 표 구조 모델을 돌리지 않았으면 행 수를 모른다
             if grid is None or not self._grid_fits(grid, page, box, rows):
+                if _is_toc(item):
+                    continue  # 선이 없는 목차는 표로 만들지 않는다 (줄마다 문단으로)
                 # 세로선 없이 위아래(와 머리 행 아래)에만 가로선이 있는 '열린 표': 글 위치로 행·열을 정한다
                 grid = text_grid(page.chars, page.rules, box)
                 if grid is None or not self._covers_text(grid, page, box):
@@ -1001,6 +1012,8 @@ class PdfParser:
         table = _table_of(item, ddoc)
         if table is None or self.ocr:
             return False
+        if _is_toc(table) and table.self_ref not in self._ruled:
+            return False  # 선 없는 목차: 줄(글 항목)을 문단으로 둔다
         ref = table.self_ref
         if ref in self._ruled:
             return False  # 괘선 격자 밖의 글

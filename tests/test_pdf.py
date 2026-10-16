@@ -3,6 +3,7 @@
 Docling(레이아웃 모델)이 필요하므로 설치되지 않은 환경에서는 건너뛴다.
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -146,3 +147,12 @@ def test_scanned_pdf_spacing(doc, tmp_path):
     common = sum((truth & pred).values())
     f1 = 2 * common / (sum(truth.values()) + sum(pred.values()))
     assert f1 >= 0.85, f1  # 그림 빈칸을 쓰기 전에는 0.74
+
+
+def test_table_of_contents_lines_stay_paragraphs():
+    # 목차(Docling document_index)는 표 구조 모델에 맡기지 않는다. 맡기면 번호와 제목이 다른 칸으로 갈라졌다
+    toc = parse(Path(__file__).parent / "fixtures" / "toc.pdf")
+    assert not [b for b in toc.iter_blocks() if isinstance(b, Table)]
+    lines = [re.sub("·+", " ", b.text).split() for b in toc.blocks if isinstance(b, Paragraph) and "·" in b.text]
+    assert [" ".join(w) for w in lines][:3] == ["I. 사업 개요 1", "1. 사업 개요 1", "2. 사업목표 및 필요성 1"]
+    assert len(lines) == 12
