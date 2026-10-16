@@ -84,3 +84,8 @@ def test_llm_text(doc):
     text = render_llm(doc)
     assert '<td rowspan="2">구분</td><td colspan="3">2026년</td>' in text
     assert "[그림: 그림 1." in text and "그림 안 글자:" in text
+
+
+def test_same_file_same_result(doc):
+    # 레이아웃 모델을 써도 결과(블록 id, 좌표 포함)는 매번 같아야 한다
+    assert parse(PDF).model_dump_json() == doc.model_dump_json()

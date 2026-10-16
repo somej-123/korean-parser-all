@@ -3,6 +3,10 @@
 모든 파서는 이 모델로 결과를 내고, 모든 출력(HTML, LLM 텍스트, JSON)은 이 모델에서 만든다.
 원본을 다시 그릴 수 있을 만큼의 정보(서식, 병합, 좌표, 도형)를 담는 것이 목표다.
 
+IR_VERSION은 이 모델의 형식 버전이다. 쓰는 쪽(검색·추출 등 후속 프로젝트)과의 약속이므로
+- 필드를 더하는 변경(기존 JSON을 그대로 읽을 수 있음)은 두 번째 자리를 올리고
+- 필드 이름·의미를 바꾸거나 빼는 변경은 첫 자리를 올린다.
+
 단위
 - 길이는 pt(포인트, 1/72인치)로 통일한다. HTML로 그릴 때 그대로 `pt` 단위를 쓴다.
 - 색은 "#RRGGBB" 문자열이다.
@@ -13,6 +17,9 @@ from __future__ import annotations
 from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+IR_VERSION = "1.0"
 
 
 class _Model(BaseModel):
@@ -388,6 +395,7 @@ class FixedPage(_Model):
 
 
 class Document(_Model):
+    schema_version: str = IR_VERSION
     meta: Meta = Field(default_factory=Meta)
     page: PageSetup = Field(default_factory=PageSetup)
     default_text_style: TextStyle = Field(default_factory=TextStyle)
