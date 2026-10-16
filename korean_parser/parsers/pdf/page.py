@@ -14,6 +14,8 @@ import statistics
 from collections import Counter
 from dataclasses import dataclass, field
 
+from .rules import read_rules
+
 BBox = tuple[float, float, float, float]  # x0, y0(위), x1, y1(아래)
 
 _BOLD_NAME = ("bold", "black", "heavy", "semibold", "demibold", "extrabold", "gothic-b", "-b", "견고딕", "헤드라인",
@@ -74,6 +76,7 @@ class PageInfo:
     height: float
     chars: list[Char] = field(default_factory=list)
     graphics: list[Graphic] = field(default_factory=list)
+    rules: list = field(default_factory=list)  # 수평·수직 선 (rules.Rule). 괘선 표 구조를 찾는 데 쓴다
     _bitmap: object = None  # 색 샘플링용 저해상도 렌더링 (PIL)
     _page: object = None
 
@@ -160,7 +163,7 @@ class PageInfo:
         flush()
         return runs
 
-    def text_lines(self, box: BBox) -> list[str]:
+    def text_lines(self, box: BBox, pad: float = 1.0) -> list[str]:
         """영역 안 글을 텍스트 레이어에서 줄 단위로 읽는다 (내용 순서).
 
         PDF에 실제로 있는 공백 글자는 그대로 두고, pdfium이 끼워 넣은 공백은 글자 사이에 실제 간격이 있을 때만
@@ -168,32 +171,39 @@ class PageInfo:
         줄 끝의 공백은 남겨 둔다 (줄을 합칠 때 어절 경계 표시로 쓴다).
         한글과 영문·숫자 사이의 좁은 간격은 AMBIGUOUS_GAP으로 표시한다.
         """
-        chars = [c for c in _dedupe_overlaps(self.chars_in(box)) if not (c.text.isspace() and c.generated)]
+        chars = [c for c in _dedupe_overlaps(self.chars_in(box, pad)) if not (c.text.isspace() and c.generated)]
         if not chars:
             return []
-        right = _right_edges([c for c in chars])
+        # 줄은 기준선 위치로 묶고, 줄 안에서는 왼쪽부터 읽는다. 그리는 순서(내용 순서)를 따르면 괄호·숫자를
+        # 따로 그리는 PDF에서 "( ) 소기업 확인서"처럼 글자 순서가 뒤섞인다.
+        lines_of: list[list[Char]] = []
+        for c in sorted(chars, key=lambda c: c.origin[1]):
+            if lines_of:
+                ref = lines_of[-1][0]
+                if abs(c.origin[1] - ref.origin[1]) <= max(ref.size, c.size, 1.0) * 0.4:
+                    lines_of[-1].append(c)
+                    continue
+            lines_of.append([c])
         lines: list[str] = []
-        cur = ""
-        prev = None
-        for i, c in enumerate(chars):
-            if prev is not None:
-                p = chars[prev]
-                size = max(p.size, c.size, 1.0)
-                if abs(c.origin[1] - p.origin[1]) > size * 0.5 or c.origin[0] < p.origin[0] - size:
-                    lines.append(cur)
-                    cur = ""
-                elif not c.text.isspace() and not p.text.isspace() and c.origin[0] - right[prev] > size * 0.15:
-                    # 공백 글자 없이 위치로 띄운 단어 사이. 한글과 영문·숫자 사이의 좁은 간격은 조판 프로그램이
-                    # 자동으로 넣는 '한글-영문 간격'일 수 있어(2026년, OCR이) 판단을 미룬다 (AMBIGUOUS_GAP)
-                    mixed = _is_hangul(p.text) != _is_hangul(c.text) and p.text.isalnum() and c.text.isalnum()
-                    cur += AMBIGUOUS_GAP if mixed and c.origin[0] - right[prev] < size * 0.4 else " "
-            if c.text.isspace():
-                if cur and not cur.endswith(" "):
-                    cur += " "
-            else:
-                cur += c.text
-            prev = i
-        lines.append(cur)
+        for line in lines_of:
+            line.sort(key=lambda c: c.origin[0])
+            right = _right_edges(line)
+            cur = ""
+            for i, c in enumerate(line):
+                if i:
+                    p = line[i - 1]
+                    size = max(p.size, c.size, 1.0)
+                    if not c.text.isspace() and not p.text.isspace() and c.origin[0] - right[i - 1] > size * 0.15:
+                        # 공백 글자 없이 위치로 띄운 단어 사이. 한글과 영문·숫자 사이의 좁은 간격은 조판 프로그램이
+                        # 자동으로 넣는 '한글-영문 간격'일 수 있어(2026년, OCR이) 판단을 미룬다 (AMBIGUOUS_GAP)
+                        mixed = _is_hangul(p.text) != _is_hangul(c.text) and p.text.isalnum() and c.text.isalnum()
+                        cur += AMBIGUOUS_GAP if mixed and c.origin[0] - right[i - 1] < size * 0.4 else " "
+                if c.text.isspace():
+                    if cur and not cur.endswith(" "):
+                        cur += " "
+                else:
+                    cur += c.text
+            lines.append(cur)
         return [ln.lstrip() for ln in lines if ln.strip()]
 
     def sample_color(self, x: float, y: float) -> str | None:
@@ -298,7 +308,7 @@ class PdfPages:
 
         # 그리는 순서(z-순서): 글자 위에 나중에 그려진 불투명 도형이 덮으면 원본에서는 안 보이는 글이다
         order: dict[int, int] = {}
-        occluders: list[tuple[int, BBox]] = []
+        occluders: list[tuple[int, BBox, object]] = []  # (그린 순서, 범위, 그림이면 그 개체)
         r, g, b, a = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
         for idx, obj in enumerate(page.get_objects(max_depth=1)):
             addr = ctypes.cast(obj.raw, ctypes.c_void_p).value
@@ -314,9 +324,11 @@ class PdfPages:
                 vb = _visible_bounds(obj)
                 if vb is not None:
                     left, bottom, right, top = vb
-                    occluders.append((idx, (left, h - top, right, h - bottom)))
+                    image = obj if obj.type == raw.FPDF_PAGEOBJ_IMAGE else None
+                    occluders.append((idx, (left, h - top, right, h - bottom), image))
 
         # 글자
+        opaque_cache: dict[int, bool] = {}
         tp = page.get_textpage()
         buf = ctypes.create_string_buffer(256)
         flags = ctypes.c_int()
@@ -353,8 +365,9 @@ class PdfPages:
             z = order.get(ctypes.cast(obj, ctypes.c_void_p).value) if obj else None
             if z is not None:
                 cx, cy = (left + right) / 2, h - (bottom + top) / 2
-                if any(oz > z and ob[0] <= cx <= ob[2] and ob[1] <= cy <= ob[3] for oz, ob in occluders):
-                    continue  # 나중에 그려진 도형에 가려진 글
+                if any(oz > z and ob[0] <= cx <= ob[2] and ob[1] <= cy <= ob[3]
+                       and (img is None or _opaque_image(img, opaque_cache)) for oz, ob, img in occluders):
+                    continue  # 나중에 그려진 도형·불투명한 그림에 가려진 글
             if weight >= 600:
                 bold = True
             elif not bold and mode == raw.FPDF_TEXTRENDERMODE_FILL_STROKE:
@@ -383,6 +396,7 @@ class PdfPages:
                 continue
             fill = None
             if kind == "path":
+                info.rules += read_rules(obj, h)
                 mode, stroke = ctypes.c_int(), ctypes.c_int()
                 if raw.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value:
                     if raw.FPDFPageObj_GetFillColor(obj.raw, r, g, b, a) and a.value > 0:
@@ -395,6 +409,22 @@ class PdfPages:
         except Exception:  # noqa: BLE001
             info._bitmap = None
         return info
+
+
+def _opaque_image(obj, cache: dict[int, bool]) -> bool:
+    """그림이 실제로 글을 덮는가. Word가 넣는 투명한 그림(알파 0)은 덮지 않는다. 그림마다 한 번만 확인한다."""
+    key = id(obj)
+    if key not in cache:
+        opaque = True
+        try:
+            img = obj.get_bitmap(render=True).to_pil()
+            if img.mode in ("RGBA", "LA"):
+                alpha = img.getchannel("A").resize((16, 16))
+                opaque = sum(alpha.tobytes()) / 256 >= 128
+        except Exception:  # noqa: BLE001 - 그림을 못 읽으면 예전처럼 덮는 것으로 본다
+            opaque = True
+        cache[key] = opaque
+    return cache[key]
 
 
 def _visible_bounds(obj) -> tuple[float, float, float, float] | None:

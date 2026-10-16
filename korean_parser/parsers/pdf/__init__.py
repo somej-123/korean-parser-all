@@ -23,6 +23,8 @@ from ...ir import (
     PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Table, Text, TextRun, TextStyle,
 )
 from ...normalize import is_hangul_syllable
+from ...outline import match_marker
+from .rules import build_grid
 from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, inside_ratio
 
 PARSER_NAME = "pdf-docling"
@@ -218,8 +220,10 @@ class PdfParser:
         # 한글 뒤 마침표·쉼표 앞의 공백은 조판 과정에서 생긴 것이다 ("돌아갑니다 ."). ':' 앞은 일부러 띄우므로 둔다
         text = _SPACE_BEFORE_PUNCT.sub("", text)
         a, b = "".join(original.split()), "".join(text.split())
-        if not a or not b:
+        if not b:
             return None
+        if not a:
+            return text  # Docling이 글을 비워 둔 영역: 텍스트 레이어에 있는 글이 원문이다
         if a == b or a in b or difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.9:
             return text
         return None
@@ -283,18 +287,23 @@ class PdfParser:
 
         skip: set[str] = set()
         last_page = None
+        self._find_ruled_tables(ddoc)
         for item, _level in ddoc.iterate_items(included_content_layers={ContentLayer.BODY}):
             if item.self_ref in skip or not getattr(item, "prov", None):
                 continue
             prov = item.prov[0]
             page_no, box = prov.page_no, self._box(prov, ddoc)
             page = self.pages.page(page_no)
+            if isinstance(item, TextItem) and self._in_ruled_table(page_no, box):
+                continue  # 괘선 표 안의 글인데 Docling이 표 밖 글로 본 것 (표에 이미 들어 있다)
             if last_page is not None and page_no != last_page:
                 self.doc.blocks.append(PageBreak(id=self._new_id(), prov=self._prov(page_no, None)))
             last_page = page_no
 
             if isinstance(item, TableItem):
-                self.doc.blocks.append(self._table(item, page, box, ddoc))
+                table = self._table(item, page, box, ddoc)
+                if table is not None:  # None: 앞의 표와 같은 괘선 표 (Docling이 한 표를 둘로 나눈 경우)
+                    self.doc.blocks.append(table)
                 for c in item.captions:
                     skip.add(c.cref)
                     cap = c.resolve(ddoc)
@@ -474,7 +483,116 @@ class PdfParser:
     # 표
     # ------------------------------------------------------------------
 
-    def _table(self, item, page: PageInfo, box: BBox, ddoc) -> Table:
+    # ------------------------------------------------------------------
+    # 괘선 표: PDF에 그어진 선으로 행·열·병합 칸을 읽는다
+    # ------------------------------------------------------------------
+
+    def _find_ruled_tables(self, ddoc) -> None:
+        """Docling이 찾은 표마다 괘선 격자를 찾는다. 같은 격자를 가리키는 표(한 표를 둘로 나눈 경우)는 하나로."""
+        from docling_core.types.doc import TableItem
+
+        self._ruled: dict[str, object] = {}  # 표 self_ref → Grid 또는 "dup"
+        self._ruled_boxes: dict[int, list[BBox]] = {}
+        if self.ocr:
+            return
+        for item, _ in ddoc.iterate_items():
+            if not isinstance(item, TableItem) or not item.prov:
+                continue
+            prov = item.prov[0]
+            page, box = self.pages.page(prov.page_no), self._box(prov, ddoc)
+            grid = build_grid(page.rules, box)
+            if grid is None or not self._grid_fits(grid, page, box, item.data.num_rows):
+                continue
+            gbox = (grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1])
+            seen = self._ruled_boxes.setdefault(prov.page_no, [])
+            if any(inside_ratio(gbox, expand(b, 2)) > 0.9 for b in seen):
+                self._ruled[item.self_ref] = "dup"
+                continue
+            seen.append(gbox)
+            self._ruled[item.self_ref] = grid
+
+    @staticmethod
+    def _grid_fits(grid, page: PageInfo, box: BBox, docling_rows: int) -> bool:
+        """괘선 격자를 믿을 수 있는가.
+
+        - 행 구분선이 없는 표(머리 행 위아래에만 선)는 본문 행이 하나로 뭉친다 → 격자가 2행 이하인데
+          Docling은 여러 행을 찾았으면 쓰지 않는다. 선이 있는 표에서는 Docling이 행을 더 잘게 나눠도 선을 믿는다
+        - Docling 표 영역의 글자 대부분이 격자 안에 있어야 한다 (격자가 표의 일부만 덮으면 글이 빠진다)
+        """
+        if grid.n_rows <= 2 and docling_rows > 3:
+            return False
+        gbox = expand((grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1]), 1)
+        chars = [c for c in page.chars_in(box) if c.text.strip()]
+        if not chars:
+            return False
+        inside = sum(1 for c in chars if gbox[0] <= (c.box[0] + c.box[2]) / 2 <= gbox[2]
+                     and gbox[1] <= (c.box[1] + c.box[3]) / 2 <= gbox[3])
+        return inside >= 0.9 * len(chars)
+
+    def _in_ruled_table(self, page_no: int, box: BBox) -> bool:
+        return any(inside_ratio(box, expand(g, 1)) > 0.8 for g in self._ruled_boxes.get(page_no, []))
+
+    def _ruled_table(self, grid, page: PageInfo) -> Table:
+        gbox = (grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1])
+        table = Table(id=self._new_id(), prov=self._prov(page.number, gbox, confidence=1.0),
+                      width_pt=round(gbox[2] - gbox[0], 1))
+        line = Border(style="solid", width_pt=0.5, color="#000000")
+        rows = [Row(height_pt=round(grid.ys[i + 1] - grid.ys[i], 1)) for i in range(grid.n_rows)]
+        for gc in grid.cells:
+            cell = Cell(row_span=gc.r1 - gc.r0 + 1, col_span=gc.c1 - gc.c0 + 1, v_align="middle")
+            inner = (gc.box[0] + 0.5, gc.box[1] + 0.5, gc.box[2] - 0.5, gc.box[3] - 0.5)
+            paragraphs = self._cell_paragraphs(page.text_lines(inner, pad=0))
+            if paragraphs:
+                style, _ = self._text_style(page, inner)
+                layout = self._cell_align(page, inner)
+                cell.blocks = [Paragraph(id=self._new_id(), prov=self._prov(page.number, gc.box),
+                                         inlines=[Text(text=t, style=style)], style=layout) for t in paragraphs]
+            bg = page.fill_at((gc.box[0] + gc.box[2]) / 2, (gc.box[1] + gc.box[3]) / 2)
+            if bg and _luma(bg) > 90:
+                cell.background = bg
+            cell.borders = Borders(**{side: line for side, has in gc.borders.items() if has})
+            rows[gc.r0].cells.append(cell)
+        table.rows = rows
+        table.col_widths_pt = [round(grid.xs[j + 1] - grid.xs[j], 1) for j in range(grid.n_cols)]
+        table.cell_padding_pt = (1.5, 4, 1.5, 4)
+        return table
+
+    @staticmethod
+    def _cell_align(page: PageInfo, inner: BBox) -> ParagraphStyle | None:
+        """칸 안 글의 좌우 여백으로 정렬을 정한다 (가운데·오른쪽 정렬은 표에서 흔하다)."""
+        chars = [c for c in page.chars_in(inner, 0) if c.text.strip()]
+        if not chars:
+            return None
+        lm = min(c.box[0] for c in chars) - inner[0]
+        rm = inner[2] - max(c.box[2] for c in chars)
+        if lm > 8 and abs(lm - rm) < max(3.0, 0.2 * (lm + rm)):  # 칸을 거의 채운 글은 왼쪽 정렬로 둔다
+            return ParagraphStyle(align="center")
+        if rm < 4 and lm > 8:
+            return ParagraphStyle(align="right")
+        return None
+
+    def _cell_paragraphs(self, lines: list[str]) -> list[str]:
+        """칸 안의 줄을 문단으로 묶는다. 개조식 기호·번호로 시작하는 줄은 새 문단이다."""
+        groups: list[list[str]] = []
+        for ln in lines:
+            if not groups or match_marker(ln.strip()):
+                groups.append([ln])
+            else:
+                groups[-1].append(ln)
+        out = []
+        for g in groups:
+            text = _SPACE_BEFORE_PUNCT.sub("", self._resolve_gaps(self._join_lines(g)))
+            text = text.replace(AMBIGUOUS_GAP, "").strip()
+            if text:
+                out.append(text)
+        return out
+
+    def _table(self, item, page: PageInfo, box: BBox, ddoc) -> Table | None:
+        grid = self._ruled.get(item.self_ref)
+        if grid == "dup":
+            return None
+        if grid is not None:
+            return self._ruled_table(grid, page)
         data = item.data
         table = Table(id=self._new_id(), prov=self._prov(page.number, box), width_pt=round(box[2] - box[0], 1))
         # 표 영역 안에 선이 있으면 칸마다 테두리를 그린다

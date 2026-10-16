@@ -102,3 +102,13 @@ def test_text_and_spacing_from_text_layer(doc):
     assert any("스캔 문서 OCR이 전체 처리 시간" in t for t in texts)
     assert any("병합 셀이 Markdown 변환 과정에서 사라짐" in t for t in texts)
     assert any(t.endswith("돌아갑니다.") for t in texts)  # 마침표 앞 조판 공백 제거
+
+
+def test_ruled_table_structure(doc):
+    # 괘선으로 읽은 표: 병합 칸이 원본(DOCX)과 같고, 칸마다 선이 있다
+    t = of(doc, Table)[0]
+    assert t.prov.confidence == 1.0
+    first = [("".join(p.text for p in c.blocks), c.row_span, c.col_span) for c in t.rows[0].cells]
+    assert first == [("구분", 2, 1), ("2026년", 1, 3)]
+    assert ["".join(p.text for p in c.blocks) for c in t.rows[-1].cells] == ["합계", "15", "19", "34"]
+    assert t.rows[2].cells[1].borders.top is not None

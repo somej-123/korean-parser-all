@@ -34,7 +34,8 @@ _MARKERS: list[tuple[str, re.Pattern[str]]] = [
     ("circled_num", re.compile(rf"^([{_CIRCLED_NUM}])\s*")),
     ("circled_hangul", re.compile(rf"^([{_CIRCLED_HANGUL}])\s*")),
     ("square", re.compile(r"^([□■◇◆▣])\s*")),
-    ("circle", re.compile(r"^([○●◦◎])\s*")),
+    ("circle", re.compile(r"^([○●◦◎❍])\s*")),
+    ("circle", re.compile(r"^(ㅇ)\s+")),  # 한글 자모 'ㅇ'을 ○ 대신 쓰는 문서가 많다 (뒤에 공백이 있을 때만)
     ("dash", re.compile(r"^([-–—])\s+")),
     ("dot", re.compile(r"^([·•∙▪])\s*")),
     ("note", re.compile(r"^(※|\*)\s*")),
