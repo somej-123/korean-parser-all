@@ -19,7 +19,7 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 
-IR_VERSION = "1.2"  # 1.2: Paragraph.heading_guess
+IR_VERSION = "1.3"  # 1.2: Paragraph.heading_guess, 1.3: Image.converted_from
 
 
 class _Model(BaseModel):
@@ -349,6 +349,7 @@ class Image(_Model):
     mime: str
     data_base64: str
     name: str | None = None
+    converted_from: str | None = None  # 브라우저가 못 그리는 원래 형식(WMF·EMF·TIFF)을 PNG로 바꿨으면 그 원래 mime
 
 
 class Note(_Model):

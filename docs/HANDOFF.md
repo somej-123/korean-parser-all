@@ -67,7 +67,8 @@ ARCHITECTURE의 'OCR 띄어쓰기'). OCR이 빠뜨린 ○ □ 기호도 모양�
   `Paragraph.heading_guess`(추정 단계, 근거)만 붙인다 (IR 1.2). `evaluate.py --heading-guess`로 추정 포함 점수를 따로 본다.
 - HWPX: 문단 중간에 놓인 글상자 글이 문단 앞에 나온다 (미리보기와 순서 차이).
 - PDF 표: 점선·선 굵기를 실선으로 그림. 굵은 글꼴 정보가 없는 PDF의 머리 행 굵게.
-- 5단계: PPTX, XLSX 파서. EMF/WMF 그림 → PNG 변환. Office 2016 신형 차트(chartex).
+- 5단계: PPTX, XLSX 파서. Office 2016 신형 차트(chartex).
+- (v0.10 완료) EMF·WMF·TIFF 그림 → PNG (`images.py`). Linux 서버에서는 LibreOffice가 있어야 메타파일을 바꾼다.
 - HWP 5.0 (v0.8 완료): 그리기 개체(사각형·타원·호·선·다각형·곡선·연결선·묶음, 글상자)는 SHAPE_COMPONENT 레코드를
   HWPX `ShapeReader`가 읽는 XML로 옮겨 SVG로 그린다 (2026-10-16). 제안요청서 '붙임. 3.' 세 문서의 글상자(둥근 사각형)가
   그려지고 경고가 사라졌다. 실제 표본이 사각형·그림뿐이라 타원·선·연결선·묶음은 공개 문서와 hwplib으로 맞춘 레코드 시험만

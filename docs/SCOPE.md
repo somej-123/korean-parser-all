@@ -42,11 +42,11 @@ korean-parser-all은 **문서 파서(엔진)**다. 원문에 있는 것을 빠�
 
 | 약속 | 내용 | 확인 |
 |---|---|---|
-| 형식 버전 | `Document.schema_version` (`ir.IR_VERSION`, 현재 1.2). 필드 추가는 두 번째 자리, 이름·의미 변경은 첫 자리를 올린다 | `tests/test_contract.py` |
+| 형식 버전 | `Document.schema_version` (`ir.IR_VERSION`, 현재 1.3). 필드 추가는 두 번째 자리, 이름·의미 변경은 첫 자리를 올린다 | `tests/test_contract.py` |
 | 결정성 | 같은 파일을 넣으면 블록 id·좌표까지 같은 결과 | `tests/test_contract.py`, `tests/test_pdf.py` |
 | JSON 왕복 | `Document.model_validate_json(doc.model_dump_json()) == doc` | `tests/test_contract.py` |
 | 블록 id | 문서 안에서 유일. HTML `data-kp-id`, LLM 텍스트 `<!-- b12 -->`, 조각의 `block_ids`가 같은 값 | `tests/test_contract.py` |
-| 실패를 숨기지 않음 | 못 읽은 개체(EMF, OLE, 신형 차트 등)는 `warnings`에 남긴다 | `benchmarks/corpus/` |
+| 실패를 숨기지 않음 | 못 읽은 개체(OLE, 신형 차트, PNG로 바꾸지 못한 EMF 등)는 `warnings`에 남긴다 | `benchmarks/corpus/` |
 
 ## 함께 넘기는 메타데이터
 
@@ -88,4 +88,4 @@ korean-parser-all은 **문서 파서(엔진)**다. 원문에 있는 것을 빠�
 |---|---|
 | 4 | 정답 세트와 요소별 평가 지표 (글자 정확도 CER, 표 구조 TEDS, 읽기 순서) |
 | 5 | PPTX, XLSX 파서 (HWP 5.0은 v0.8에서 완료) |
-| 수시 | 실제 문서에서 찾은 파싱 오류 수정 (예: PDF 제목의 띄어쓰기, EMF 이미지 변환, 다단·바탕쪽) |
+| 수시 | 실제 문서에서 찾은 파싱 오류 수정 (예: PDF 제목의 띄어쓰기, 다단·바탕쪽) |

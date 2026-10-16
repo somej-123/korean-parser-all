@@ -24,7 +24,7 @@ Docling·RapidOCR이 내려받습니다. 함께 묶어 배포한다면 각 라�
 | [RapidOCR](https://github.com/RapidAI/RapidOCR) 3.10 | 스캔 PDF 글자 인식 | RapidAI | Apache-2.0 |
 | [ONNX Runtime](https://onnxruntime.ai) 1.31 | RapidOCR 모델 실행 | Microsoft | MIT |
 | [PyTorch](https://pytorch.org) 2.14 (CPU) | Docling 레이아웃·표 모델 실행 | PyTorch 재단 | BSD-3-Clause 등 (패키지 정보: Apache-2.0 AND BSD-3-Clause AND MIT …) |
-| [Pillow](https://github.com/python-pillow/Pillow) 12.3 | 그림 자르기·PNG 저장 | Pillow 개발자 | MIT-CMU |
+| [Pillow](https://github.com/python-pillow/Pillow) 12.3 | 그림 자르기·PNG 저장, WMF·EMF·TIFF → PNG | Pillow 개발자 | MIT-CMU |
 | [NumPy](https://numpy.org) 2.5 | 스캔 쪽 그림의 빈칸 계산 (`ocr_spacing.py`) | NumPy 개발자 | BSD-3-Clause |
 
 Docling은 이 밖에도 Hugging Face transformers·huggingface-hub(Apache-2.0), OpenCV(Apache-2.0) 등을 함께 설치합니다.
@@ -47,7 +47,7 @@ Docling은 이 밖에도 Hugging Face transformers·huggingface-hub(Apache-2.0),
 | [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) 3.14 | 평가: 글자 오류율·블록 짝짓기 | MIT |
 | [APTED](https://github.com/JoaoFelipe/apted) 1.0 | 평가: 표 TEDS의 트리 편집 거리 | MIT |
 | [Playwright](https://github.com/microsoft/playwright-python) 1.64 (Chromium) | 화면 비교: HTML을 그림으로 | Apache-2.0 |
-| [LibreOffice](https://www.libreoffice.org) (설치 프로그램, pip 아님) | 평가용 DOCX → PDF 변환, DOCX 화면 비교 | MPL-2.0 |
+| [LibreOffice](https://www.libreoffice.org) (설치 프로그램, pip 아님) | 평가용 DOCX → PDF 변환, DOCX 화면 비교, (있으면) WMF·EMF → PNG | MPL-2.0 |
 
 ## 시험 파일
 

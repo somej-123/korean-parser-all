@@ -93,8 +93,11 @@ def supported_formats() -> list[str]:
     return sorted(_PARSERS)
 
 
-def parse(path: str | Path, korean: bool = True) -> Document:
-    """문서를 IR로 변환한다. korean=True면 한국어 처리 레이어(정규화, 개조식 계층)를 적용한다."""
+def parse(path: str | Path, korean: bool = True, convert_images: bool = True) -> Document:
+    """문서를 IR로 변환한다. korean=True면 한국어 처리 레이어(정규화, 개조식 계층)를 적용한다.
+
+    convert_images=True면 브라우저가 못 그리는 그림(WMF·EMF·TIFF)을 PNG로 바꿔 넣는다 (images.py).
+    """
     path = Path(path)
     if _is_ole(path):
         from .hwp import is_hwp
@@ -114,6 +117,10 @@ def parse(path: str | Path, korean: bool = True) -> Document:
     except zipfile.BadZipFile as exc:
         raise DocumentError(f"{path.name}: 손상된 파일입니다 ({exc})") from exc
     _stamp_source(doc, path)
+    if convert_images:
+        from ..images import convert_unrenderable
+
+        convert_unrenderable(doc)
     if korean:
         from ..enrich import enrich_korean
 
