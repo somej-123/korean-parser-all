@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from korean_parser.ir import Break, Heading, Paragraph, Tab, Table
+from korean_parser.ir import Break, Drawing, Heading, Paragraph, Tab, Table
 from korean_parser.parsers.hwp import HwpParser
 from korean_parser.parsers.hwp.records import Tag, build_tree, read_records
 
@@ -111,9 +111,9 @@ class FakeFile:
 
     compressed = False
 
-    def __init__(self):
+    def __init__(self, body_data: bytes | None = None):
         self._doc = read_records(docinfo())
-        self._body = build_tree(read_records(body()))
+        self._body = build_tree(read_records(body() if body_data is None else body_data))
 
     def flat_records(self, name):
         return self._doc
@@ -194,3 +194,123 @@ def test_not_hwp_ole_is_refused(tmp_path):
     with pytest.raises(DocumentError):
         parse(fake)
 
+
+
+# ---------------------------------------------------------------------------
+# 그리기 개체 (gso): 실제 문서(제안요청서의 글상자)에서 확인한 레코드 배치를 따른다
+# ---------------------------------------------------------------------------
+
+
+def matrix(a=1.0, b=0.0, c=0.0, d=0.0, e=1.0, f=0.0) -> bytes:
+    return struct.pack("<6d", a, b, c, d, e, f)
+
+
+def colorref(rgb: str) -> int:
+    """#RRGGBB → COLORREF(0x00BBGGRR)."""
+    r, g, b = (int(rgb[i:i + 2], 16) for i in (1, 3, 5))
+    return b << 16 | g << 8 | r
+
+
+def component(cid: str, w: int, h: int, *, top=True, scale=(1.0, 1.0), move=(0, 0), line=("#000000", 33, 1),
+              fill: str | None = None, instid=0, children: list[int] | None = None) -> bytes:
+    """개체 요소(SHAPE_COMPONENT): 컨트롤 id(맨 위 개체는 두 번), 위치·크기, 행렬, 선, 채우기, 그림자, 개체 id."""
+    ids = cid[::-1].encode("latin-1") * (2 if top else 1)
+    cur = (round(w * scale[0]), round(h * scale[1]))
+    out = ids + struct.pack("<iiHHIIIIIhii", 0, 0, 0, 1, w, h, *cur, 0, 0, cur[0] // 2, cur[1] // 2)
+    out += struct.pack("<H", 1) + matrix(c=move[0], f=move[1]) + matrix(a=scale[0], e=scale[1]) + matrix()
+    if children is not None:  # 묶음: 안 개체 수와 컨트롤 id
+        return out + struct.pack("<H", len(children)) + b"".join(struct.pack("<I", c) for c in children)             + struct.pack("<I", instid)
+    color, width, attr = line
+    out += struct.pack("<IiIB", colorref(color), width, attr, 0)
+    if fill:
+        out += struct.pack("<IIIi", 1, colorref(fill), 0, -1) + struct.pack("<I", 0) + bytes(1)
+    else:
+        out += struct.pack("<II", 0, 0)
+    return out + bytes(16) + struct.pack("<I", instid) + bytes(2)
+
+
+def gso(level: int, obj_id: int, w: int, h: int) -> bytes:
+    """그리기 개체의 컨트롤 머리: 글자처럼 취급, 크기, 개체 id."""
+    common = struct.pack("<IiiIIi", 0x1, 0, 0, w, h, 0) + bytes(8) + struct.pack("<Ii", obj_id, 0) + wtext("")
+    return rec(Tag.CTRL_HEADER, level, b" osg" + common)
+
+
+def rect_points(level: int, w: int, h: int, ratio=0) -> bytes:
+    return rec(Tag.SHAPE_COMPONENT_RECTANGLE, level, struct.pack("<B8i", ratio, 0, 0, w, 0, w, h, 0, h))
+
+
+def text_box(level: int, text: str, v_align=1) -> bytes:
+    """글상자: LIST_HEADER(문단 수, 속성의 세로 정렬, 안쪽 여백 1mm, 너비) 뒤 문단."""
+    head = struct.pack("<hHI4HI", 1, 0, v_align << 5, 283, 283, 283, 283, 10000)
+    return rec(Tag.LIST_HEADER, level, head) + para(level, text)
+
+
+def shape_doc(*objects: bytes):
+    """그리기 개체를 하나씩 문단에 넣은 문서."""
+    data = b"".join(para(0, ctrl(11, "gso "), extra=o) for o in objects)
+    doc = HwpParser("shapes.hwp", file=FakeFile(data)).parse()
+    return doc, [b for b in doc.blocks if isinstance(b, Drawing)]
+
+
+def test_rect_text_box():
+    # 100×50pt로 만든 둥근 사각형을 가로로 2배 늘림. 노란 채우기, 빨간 파선 0.5pt, 가운데 정렬 글상자
+    obj = gso(1, 7, 20000, 5000)
+    obj += rec(Tag.SHAPE_COMPONENT, 2, component("$rec", 10000, 5000, scale=(2.0, 1.0),
+                                                   line=("#FF0000", 50, 2), fill="#FFFF00", instid=8))
+    obj += text_box(3, "상자 안 글") + rect_points(3, 10000, 5000, ratio=20)
+    doc, (d,) = shape_doc(obj)
+    s = d.shapes[0]
+    assert (d.width_pt, d.height_pt) == (200.0, 50.0)
+    assert (s.geometry, s.x, s.y, s.width, s.height) == ("roundRect", 0, 0, 200.0, 50.0)
+    assert s.path.startswith("M10,0 H190 A10,10")  # 곡률 20% → 반지름은 짧은 변(50pt)의 20%
+    assert (s.fill, s.stroke, s.stroke_width_pt, s.stroke_dash) == ("#FFFF00", "#FF0000", 0.5, "dashed")
+    assert [b.text for b in s.text_blocks] == ["상자 안 글"] and s.text_v_align == "middle"
+    assert s.id == "8" and not doc.warnings
+
+
+def test_group_with_connector():
+    # 묶음 안에 사각형 두 개와 꺾인 한쪽 화살표 연결선. 안 개체의 행렬은 묶음 기준 좌표로 옮긴다
+    left = rec(Tag.SHAPE_COMPONENT, 3, component("$rec", 4000, 2000, top=False, instid=11)) + rect_points(4, 4000, 2000)
+    right = rec(Tag.SHAPE_COMPONENT, 3, component("$rec", 4000, 2000, top=False, move=(10000, 3000), instid=12))
+    right += rect_points(4, 4000, 2000)
+    link = struct.pack("<4iI4II", 4000, 1000, 10000, 4000, 4, 11, 1, 12, 3, 0)  # 끝: (개체 id, 연결점), 조절점 0개
+    conn = rec(Tag.SHAPE_COMPONENT, 3, component("$col", 6000, 3000, top=False, move=(4000, 1000), instid=13))
+    conn += rec(Tag.SHAPE_COMPONENT_LINE, 4, struct.pack("<4i", 0, 0, 6000, 3000) + link[16:])
+    obj = gso(1, 20, 14000, 5000)
+    obj += rec(Tag.SHAPE_COMPONENT, 2, component("$con", 14000, 5000, instid=21, children=[1, 2, 3]))
+    obj += left + right + conn
+    doc, (d,) = shape_doc(obj)
+    a, b, c = d.shapes
+    assert (a.x, a.y, b.x, b.y) == (0, 0, 100.0, 30.0)
+    assert c.geometry == "bentConnector3" and c.tail_arrow and not c.head_arrow
+    assert (c.connect_from, c.connect_to) == ("11", "12") and (c.x, c.y, c.width, c.height) == (40.0, 10.0, 60.0, 30.0)
+    assert not doc.warnings
+
+
+def test_connector_to_top_level_ids():
+    # 연결선 끝이 컨트롤 머리의 개체 id를 가리켜도 그 개체의 도형 id(instid)로 잇는다
+    box = gso(1, 100, 4000, 2000) + rec(Tag.SHAPE_COMPONENT, 2, component("$rec", 4000, 2000, instid=101))
+    box += rect_points(3, 4000, 2000)
+    line = gso(1, 200, 4000, 1) + rec(Tag.SHAPE_COMPONENT, 2, component("$col", 4000, 1, instid=201))
+    line += rec(Tag.SHAPE_COMPONENT_LINE, 3, struct.pack("<4iI4II", 0, 0, 4000, 0, 0, 100, 1, 0, 0, 0))
+    doc, (_, d) = shape_doc(box, line)
+    assert d.shapes[0].geometry == "straightConnector1" and d.shapes[0].connect_from == "101"
+
+
+def test_ellipse_line_polygon_curve():
+    ell = gso(1, 1, 4000, 2000) + rec(Tag.SHAPE_COMPONENT, 2, component("$ell", 4000, 2000, fill="#00FF00"))
+    ell += rec(Tag.SHAPE_COMPONENT_ELLIPSE, 3, struct.pack("<I6i", 0, 2000, 1000, 4000, 1000, 2000, 0) + bytes(24))
+    # 끝 화살표(모양 1) 실선
+    lin = gso(1, 2, 4000, 0) + rec(Tag.SHAPE_COMPONENT, 2, component("$lin", 4000, 0, line=("#0000FF", 100, 1 | 1 << 16)))
+    lin += rec(Tag.SHAPE_COMPONENT_LINE, 3, struct.pack("<4ii", 0, 0, 4000, 0, 0))
+    pol = gso(1, 3, 2000, 2000) + rec(Tag.SHAPE_COMPONENT, 2, component("$pol", 2000, 2000))
+    pol += rec(Tag.SHAPE_COMPONENT_POLYGON, 3, struct.pack("<i6i", 3, 0, 2000, 1000, 0, 2000, 2000))
+    cur = gso(1, 4, 2000, 1000) + rec(Tag.SHAPE_COMPONENT, 2, component("$cur", 2000, 1000))
+    cur += rec(Tag.SHAPE_COMPONENT_CURVE, 3, struct.pack("<i6i2B", 3, 0, 1000, 1000, 0, 2000, 1000, 1, 1) + bytes(4))
+    doc, (e, ln, pg, cv) = shape_doc(ell, lin, pol, cur)
+    s = e.shapes[0]
+    assert (s.geometry, s.width, s.height, s.fill) == ("ellipse", 40.0, 20.0, "#00FF00")
+    s = ln.shapes[0]
+    assert (s.geometry, s.width, s.stroke, s.stroke_width_pt, s.tail_arrow, s.head_arrow) ==         ("line", 40.0, "#0000FF", 1.0, True, False)
+    assert pg.shapes[0].path == "M0,20 L10,0 L20,20 Z"
+    assert cv.shapes[0].path.startswith("M0,10 C") and not doc.warnings

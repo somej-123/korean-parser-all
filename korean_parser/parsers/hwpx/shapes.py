@@ -175,8 +175,17 @@ class ShapeReader:
         ratio = int(el.get("ratio", "0") or 0)
         common = dict(x=x, y=y, width=w, height=h, fill=_fill(el), **_line_style(el))
         common["head_arrow"] = common["tail_arrow"] = False
+        if axis_aligned and ratio:
+            # 곡률(%)은 짧은 변에 대한 모서리 반지름의 비율이다 (50이 반원). 기본 둥근 사각형(1/6)과 달라 경로로 그린다
+            rad = min(w, h) * min(ratio, 50) / 100
+            r, b = x + w, y + h
+            path = (f"M{_f(x + rad)},{_f(y)} H{_f(r - rad)} A{_f(rad)},{_f(rad)} 0 0 1 {_f(r)},{_f(y + rad)} "
+                    f"V{_f(b - rad)} A{_f(rad)},{_f(rad)} 0 0 1 {_f(r - rad)},{_f(b)} H{_f(x + rad)} "
+                    f"A{_f(rad)},{_f(rad)} 0 0 1 {_f(x)},{_f(b - rad)} V{_f(y + rad)} "
+                    f"A{_f(rad)},{_f(rad)} 0 0 1 {_f(x + rad)},{_f(y)} Z")
+            return Shape(geometry="roundRect", path=path, **common)
         if axis_aligned:
-            return Shape(geometry="roundRect" if ratio else "rect", **common)
+            return Shape(geometry="rect", **common)
         path = "M" + " L".join(f"{_f(px)},{_f(py)}" for px, py in pts) + " Z"
         return Shape(geometry="custom", path=path, **common)
 

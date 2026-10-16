@@ -11,7 +11,8 @@ XML(header.xml, section.xml에서 HWPX 파서가 읽는 요소·속성)로 옮�
 HWPX와 다른 점
 - 문단 여백·간격 값은 실제의 2배로 저장된다 (HWPX의 hp:default와 같은 구버전 호환 값). 2로 나눈다.
 - 테두리/배경 id는 1부터, 글자·문단 모양과 스타일 id는 0부터 센다 (HWPX와 같다).
-- 그림·글상자 밖의 도형(사각형, 선 등)은 아직 그리지 않고, 도형 안 글만 문단으로 꺼낸다.
+- 그리기 개체(사각형, 타원, 선, 다각형, 곡선, 연결선, 묶음, 그림)는 개체 요소 레코드를 HWPX의 hp:rect 등과
+  같은 모양(renderingInfo 행렬, 꼭짓점, lineShape, fillBrush, drawText)으로 옮겨 HWPX의 ShapeReader가 그린다.
 
 참고: 한글과컴퓨터 「한글 문서 파일 형식 5.0」 공개 문서.
 """
@@ -350,6 +351,7 @@ class _Body:
     def section(self, records: list[Record]):
         sec = etree.Element("sec")
         self._paragraphs(sec, [r for r in records if r.tag == Tag.PARA_HEADER])
+        _link_connectors(sec)
         return sec
 
     def _paragraphs(self, parent, paras: list[Record]) -> None:
@@ -507,14 +509,14 @@ class _Body:
         v_off, h_off, w, h = rd.i32(), rd.i32(), rd.u32(), rd.u32()
         rd.i32()  # z 순서
         rd.skip(8)  # 바깥 여백
-        rd.u32()  # 개체 id
+        obj_id = rd.u32()
         rd.i32()  # 쪽 나눔 방지
         desc = rd.text()
         return {
             "treat": attr & 0x1, "vert_rel": _VERT_REL.get((attr >> 3) & 0x3, "PARA"),
             "vert_align": _VERT_ALIGN.get((attr >> 5) & 0x7, "TOP"), "horz_rel": _HORZ_REL.get((attr >> 8) & 0x3, "COLUMN"),
             "horz_align": _HORZ_ALIGN.get((attr >> 10) & 0x7, "LEFT"), "wrap": _WRAP.get((attr >> 21) & 0x7, "SQUARE"),
-            "v_off": v_off, "h_off": h_off, "w": w, "h": h, "desc": desc,
+            "v_off": v_off, "h_off": h_off, "w": w, "h": h, "desc": desc, "id": obj_id,
         }
 
     def _place(self, el, common: dict) -> None:
@@ -568,54 +570,246 @@ class _Body:
             _sub(tc, "cellSz", width=cw, height=ch)
 
     def _shape(self, run, ctrl: Record) -> None:
-        """그림은 그림으로, 그 밖의 도형은 도형 안 글만 꺼낸다."""
+        """그리기 개체(gso): 개체 요소(SHAPE_COMPONENT)를 HWPX의 hp:rect, hp:pic … 으로 옮긴다."""
         common = self._common(ctrl)
         comp = ctrl.kid(Tag.SHAPE_COMPONENT)
-        pic = _find(comp, Tag.SHAPE_COMPONENT_PICTURE) if comp is not None else None
-        if pic is not None:
-            el = _sub(run, "pic")
-            self._place(el, common)
-            rd = Reader(pic.data)
-            rd.skip(4 + 4 + 4 + 32 + 16 + 8 + 3)  # 테두리, 꼭짓점, 자르기, 안쪽 여백, 밝기·명암·효과
-            _sub(el, "img", binaryItemIDRef=f"bin{rd.u16()}")
+        if comp is None:
             return
-        texts = _texts_in(comp) if comp is not None else []
-        if texts:
-            # 글상자의 글: 도형은 그리지 않고 글만 본문으로 (글자처럼 취급한 개체는 그 자리에)
-            self.warn("도형(글상자 등)은 아직 그리지 않고 안의 글만 꺼냄 (HWP)")
-            box = _sub(run, "rect")
-            self._place(box, common)
-            dt = _sub(box, "drawText")
-            sub = _sub(dt, "subList")
-            self._paragraphs(sub, texts)
-        else:
-            self.warn("도형은 아직 그리지 않음 (HWP)")
+        el = self._component(run, comp, top=True)
+        if el is None:
+            return
+        el.set("id", str(common["id"]))
+        self._place(el, common)
+
+    def _component(self, parent, sc: Record, top: bool):
+        """개체 요소 하나 → HWPX 개체 요소. 레코드 배치 (실제 파일과 hwplib으로 확인):
+
+            SHAPE_COMPONENT  컨트롤 id (맨 위 개체는 두 번), 묶음 안 위치, 원래·현재 크기, 회전,
+                             renderingInfo(이동 행렬 + 확대·회전 행렬 쌍), [선, 채우기, 그림자, 개체 id]
+              LIST_HEADER + PARA_HEADER …   글상자 (사각형·타원·다각형·곡선·호)
+              SHAPE_COMPONENT_RECTANGLE 등  모양 (꼭짓점)
+              SHAPE_COMPONENT …             묶음 안 개체
+        """
+        cid = ctrl_id(sc.data)
+        kind = _GSO.get(cid)
+        if kind is None:
+            self.warn(f"{_GSO_NAME.get(cid, '알 수 없는 그리기 개체')}는 아직 그리지 않음 (HWP)")
+            return None
+        el = _sub(parent, kind)
+        rd = Reader(sc.data, 8 if top else 4)
+        rd.skip(8 + 4)  # 묶음 안 위치, 묶음 단계, 버전
+        org_w, org_h, cur_w, cur_h = (rd.u32() for _ in range(4))
+        rd.skip(4 + 2 + 8)  # 뒤집기 속성, 회전각, 회전 중심 (행렬에 이미 들어 있다)
+        _sub(el, "orgSz", width=org_w, height=org_h)
+        _sub(el, "curSz", width=cur_w, height=cur_h)
+        info = _sub(el, "renderingInfo")
+        pairs = rd.u16()
+        _matrix(info, "transMatrix", rd)
+        for _ in range(pairs):
+            _matrix(info, "scaMatrix", rd)
+            _matrix(info, "rotMatrix", rd)
+        if kind == "container":
+            rd.skip(4 * rd.u16())  # 묶음 안 개체의 컨트롤 id
+            if rd.left() >= 4:
+                el.set("instid", str(rd.u32()))
+            for c in sc.children:
+                for child in ([c] if c.tag == Tag.SHAPE_COMPONENT else c.kids(Tag.SHAPE_COMPONENT)):
+                    self._component(el, child, top=False)
+            return el
+        if rd.left():
+            _line_info(el, rd)
+        if rd.left():
+            _fill_info(el, rd)
+        rd.skip(16)  # 그림자: 종류, 색, 가로·세로 거리
+        if rd.left() >= 4:
+            el.set("instid", str(rd.u32()))
+        self._draw_text(el, sc)
+        getattr(self, f"_{kind}_geometry")(el, sc)
+        return el
+
+    def _draw_text(self, el, sc: Record) -> None:
+        """글상자: LIST_HEADER(문단 수, 속성, 안쪽 여백, 최대 너비) 뒤에 그 글상자의 문단이 형제로 이어진다."""
+        head = sc.kid(Tag.LIST_HEADER)
+        if head is None:
+            return
+        rd = Reader(head.data)
+        rd.i16()
+        rd.u16()
+        attr = rd.u32()
+        left, right, top, bottom = (rd.u16() for _ in range(4))
+        dt = _sub(el, "drawText", lastWidth=rd.u32())
+        _sub(dt, "textMargin", left=left, right=right, top=top, bottom=bottom)
+        sub = _sub(dt, "subList", vertAlign=_V_ALIGN.get((attr >> 5) & 0x3, "TOP"))
+        start = sc.children.index(head) + 1
+        paras = []
+        for r in sc.children[start:]:
+            if r.tag != Tag.PARA_HEADER:
+                break
+            paras.append(r)
+        self._paragraphs(sub, paras)
+
+    def _rect_geometry(self, el, sc: Record) -> None:
+        r = sc.kid(Tag.SHAPE_COMPONENT_RECTANGLE)
+        if r is None:
+            return
+        rd = Reader(r.data)
+        el.set("ratio", str(rd.u8()))  # 모서리 곡률(%)
+        for i in range(4):
+            _point(el, f"pt{i}", rd)
+
+    def _ellipse_geometry(self, el, sc: Record) -> None:
+        r = sc.kid(Tag.SHAPE_COMPONENT_ELLIPSE)
+        if r is None:
+            return
+        rd = Reader(r.data)
+        rd.u32()  # 속성 (호로 바뀐 타원 등)
+        for name in ("center", "ax1", "ax2"):
+            _point(el, name, rd)
+
+    def _arc_geometry(self, el, sc: Record) -> None:
+        r = sc.kid(Tag.SHAPE_COMPONENT_ARC)
+        if r is None:
+            return
+        rd = Reader(r.data)
+        el.set("type", _ARC_TYPE.get(rd.u8(), "NORMAL"))
+        for name in ("center", "ax1", "ax2"):
+            _point(el, name, rd)
+
+    def _line_geometry(self, el, sc: Record) -> None:
+        r = sc.kid(Tag.SHAPE_COMPONENT_LINE)
+        if r is None:
+            return
+        rd = Reader(r.data)
+        _point(el, "startPt", rd)
+        _point(el, "endPt", rd)
+
+    def _connectLine_geometry(self, el, sc: Record) -> None:  # noqa: N802 - HWPX 요소 이름
+        """연결선: 선 레코드에 종류와 양 끝이 붙은 개체(id, 연결점 번호)가 더 붙는다."""
+        r = sc.kid(Tag.SHAPE_COMPONENT_LINE)
+        if r is None:
+            return
+        rd = Reader(r.data)
+        sx, sy, ex, ey = (rd.i32() for _ in range(4))
+        kind = rd.u32()
+        el.set("type", _LINK_TYPE[kind] if kind < len(_LINK_TYPE) else "STRAIGHT_NOARROW")
+        for name, x, y in (("startPt", sx, sy), ("endPt", ex, ey)):
+            subject, idx = rd.u32(), rd.u32()
+            _sub(el, name, x=x, y=y, subjectIDRef=subject, subjectIdx=idx)
+
+    def _polygon_geometry(self, el, sc: Record) -> None:
+        r = sc.kid(Tag.SHAPE_COMPONENT_POLYGON)
+        if r is None:
+            return
+        rd = Reader(r.data)
+        for _ in range(max(min(rd.i32(), rd.left() // 8), 0)):
+            _point(el, "pt", rd)
+
+    def _curve_geometry(self, el, sc: Record) -> None:
+        """곡선: 점 n개 뒤에 구간 n-1개의 종류(0 직선, 1 곡선)."""
+        r = sc.kid(Tag.SHAPE_COMPONENT_CURVE)
+        if r is None:
+            return
+        rd = Reader(r.data)
+        n = max(min(rd.i32(), rd.left() // 8), 0)
+        pts = [(rd.i32(), rd.i32()) for _ in range(n)]
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            _sub(el, "seg", type="CURVE" if rd.u8() == 1 else "LINE", x1=x1, y1=y1, x2=x2, y2=y2)
+
+    def _pic_geometry(self, el, sc: Record) -> None:
+        r = sc.kid(Tag.SHAPE_COMPONENT_PICTURE)
+        if r is None:
+            return
+        rd = Reader(r.data)
+        rd.skip(4 + 4 + 4)  # 테두리 색, 굵기, 속성
+        rect = _sub(el, "imgRect")
+        for i in range(4):
+            _point(rect, f"pt{i}", rd)
+        rd.skip(16 + 8 + 3)  # 자르기, 안쪽 여백, 밝기·명암·효과
+        _sub(el, "img", binaryItemIDRef=f"bin{rd.u16()}")
+
+    def _ole_geometry(self, el, sc: Record) -> None:
+        pass  # OLE 개체는 HWPX 파서가 '표시하지 않음'으로 알린다
 
 
-def _find(rec: Record | None, tag: int) -> Record | None:
-    if rec is None:
-        return None
-    if rec.tag == tag:
-        return rec
-    for c in rec.children:
-        found = _find(c, tag)
-        if found is not None:
-            return found
-    return None
+# 그리기 개체의 컨트롤 id → HWPX 요소 이름
+_GSO = {"$rec": "rect", "$ell": "ellipse", "$arc": "arc", "$lin": "line", "$pol": "polygon", "$cur": "curve",
+        "$col": "connectLine", "$con": "container", "$pic": "pic", "$ole": "ole"}
+_GSO_NAME = {"$tat": "글맵시"}
+_ARC_TYPE = {0: "NORMAL", 1: "PIE", 2: "CHORD"}
+_LINK_TYPE = ["STRAIGHT_NOARROW", "STRAIGHT_ONEWAY", "STRAIGHT_BOTH", "STROKE_NOARROW", "STROKE_ONEWAY", "STROKE_BOTH",
+              "ARC_NOARROW", "ARC_ONEWAY", "ARC_BOTH"]
+_ARROW = ["NORMAL", "ARROW", "SPEAR", "CONCAVE_ARROW", "DIAMOND", "CIRCLE", "BOX"]
 
 
-def _texts_in(rec: Record) -> list[Record]:
-    """도형 안 글상자의 문단들 (LIST_HEADER 뒤 PARA_HEADER)."""
-    out: list[Record] = []
-    seen_list = False
-    for c in rec.children:
-        if c.tag == Tag.LIST_HEADER:
-            seen_list = True
-        elif c.tag == Tag.PARA_HEADER and seen_list:
-            out.append(c)
-        else:
-            out += _texts_in(c)
-    return out
+def _link_connectors(sec) -> None:
+    """연결선 끝의 개체 id가 컨트롤 머리의 개체 id를 가리키면, ShapeReader가 도형 id로 쓰는 instid로 바꾼다.
+    (실제 HWP 연결선 표본이 없어, 둘 중 어느 쪽을 가리키든 이어지게 한다.)"""
+    inst = {el.get("id"): el.get("instid") for el in sec.iter() if el.get("id") and el.get("instid")}
+    for line in sec.iter("connectLine"):
+        for end in (kid for kid in line if kid.tag in ("startPt", "endPt")):
+            ref = end.get("subjectIDRef")
+            if ref in inst:
+                end.set("subjectIDRef", inst[ref])
+
+
+def _point(parent, name: str, rd: Reader):
+    return _sub(parent, name, x=rd.i32(), y=rd.i32())
+
+
+def _matrix(parent, name: str, rd: Reader) -> None:
+    """행렬: double 6개 (e1 e2 e3 / e4 e5 e6, x' = e1·x + e2·y + e3)."""
+    values = [struct.unpack("<d", rd.data[rd.pos + 8 * k:rd.pos + 8 * k + 8])[0] if rd.left() >= 8 * (k + 1) else 0.0
+              for k in range(6)]
+    rd.skip(48)
+    _sub(parent, name, **{f"e{k + 1}": repr(v) for k, v in enumerate(values)})
+
+
+def _line_info(el, rd: Reader) -> None:
+    """선: 색, 굵기(HWPUNIT), 속성(종류·끝 모양·화살표), 바깥선 방식."""
+    col, width, attr = rd.color(), rd.i32(), rd.u32()
+    rd.u8()
+    kind = attr & 0x3F
+
+    def arrow(shape: int, filled: bool) -> str:
+        name = _ARROW[shape] if shape < len(_ARROW) else "NORMAL"
+        if name in ("DIAMOND", "CIRCLE", "BOX"):
+            name = ("FILLED_" if filled else "EMPTY_") + name
+        return name
+
+    _sub(el, "lineShape", color=col or "#000000", width=width,
+         style=_STROKE[kind] if kind < len(_STROKE) else "SOLID",
+         headStyle=arrow((attr >> 10) & 0x3F, bool(attr >> 30 & 1)),
+         tailStyle=arrow((attr >> 16) & 0x3F, bool(attr >> 31 & 1)))
+
+
+def _fill_info(el, rd: Reader) -> None:
+    """채우기: 종류(1 단색, 2 그림, 4 그러데이션) 뒤에 종류마다의 값, 추가 속성.
+    그러데이션의 값 크기는 공개 문서(2바이트)와 달리 1·4바이트다 (hwplib의 확인)."""
+    kind = rd.u32()
+    if kind == 0:
+        rd.skip(4)
+        return
+    brush = _sub(el, "fillBrush")
+    if kind & 0x1:
+        face, hatch = rd.color(), rd.color()
+        rd.i32()  # 무늬 종류
+        _sub(brush, "winBrush", faceColor=face or "none", hatchColor=hatch or "#000000")
+    if kind & 0x4:
+        rd.i8()  # 종류 (줄무늬, 원형 …)
+        rd.skip(16)  # 각도, 중심 x·y, 번짐 정도
+        n = rd.u32()
+        if n > 2:
+            rd.skip(4 * n)  # 색이 바뀌는 곳
+        grad = _sub(brush, "gradation")
+        for _ in range(min(n, rd.left() // 4)):
+            _sub(grad, "color", value=rd.color() or "#FFFFFF")
+    if kind & 0x2:
+        mode = rd.u8()
+        rd.skip(3)  # 명암, 밝기, 효과
+        img_brush = _sub(brush, "imgBrush", mode=mode)
+        _sub(img_brush, "img", binaryItemIDRef=f"bin{rd.u16()}")
+    rd.skip(rd.u32())  # 추가 속성
+    rd.skip(bin(kind & 0x7).count("1"))  # 종류마다 1바이트 (내용 모름)
 
 
 # ---------------------------------------------------------------------------

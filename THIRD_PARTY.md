@@ -65,6 +65,7 @@ Docling은 이 밖에도 Hugging Face transformers·huggingface-hub(Apache-2.0),
 |---|---|---|
 | 한글 문서 파일 형식 5.0 (revision 1.3) | HWP 파서 (`korean_parser/parsers/hwp/`) | 한글과컴퓨터 공개 문서 ([cdn.hancom.com](https://cdn.hancom.com/link/docs/한글문서파일형식_5.0_revision1.3.pdf)) |
 | OWPML (KS X 6101, HWPX) | HWPX 파서 | 한글과컴퓨터 / 국가표준 |
+| [hwplib](https://github.com/neolord0/hwplib) 읽기 코드 | HWP 그리기 개체 레코드 배치 확인 (공개 문서에 없는 연결선, 문서와 다른 그러데이션 값 크기). 코드는 가져오지 않았다 | neolord0, Apache-2.0 |
 
 본 제품은 한글과컴퓨터의 한글 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
 
