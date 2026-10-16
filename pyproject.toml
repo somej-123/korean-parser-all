@@ -7,7 +7,9 @@ name = "korean-parser"
 dynamic = ["version"]
 description = "한국어 문서 파서: 통합 문서 모델, 후처리 없는 HTML, LLM용 텍스트, 한국어 처리"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "우정호 (woojungho)" }]
 requires-python = ">=3.10"
 dependencies = [
     "kiwipiepy>=0.20",

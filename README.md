@@ -198,4 +198,15 @@ HWPX
 
 ## 라이선스
 
-[MIT](LICENSE)
+[Apache License 2.0](LICENSE) · Copyright 2026 우정호 (woojungho)
+
+자유롭게 쓰고, 고치고, 상업적으로 써도 됩니다. 이 프로젝트나 이를 고친 것을 배포할 때는
+[NOTICE](NOTICE) 파일의 내용(만든 사람과 출처)을 함께 전달해 주세요 (문서, 정보 화면 등).
+고친 파일에는 고쳤다는 표시를 남겨 주세요.
+
+출처 표기 예:
+
+```text
+이 제품은 우정호(woojungho)가 만든 korean-parser-all
+(https://github.com/somej-123/korean-parser-all, Apache License 2.0)을 사용합니다.
+```

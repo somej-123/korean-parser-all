@@ -1,0 +1,11 @@
+korean-parser-all
+Copyright 2026 우정호 (woojungho)
+
+This product includes software developed by 우정호 (woojungho)
+(https://github.com/somej-123/korean-parser-all).
+
+이 소프트웨어는 우정호(woojungho)가 만들었습니다.
+이 소프트웨어나 이를 고친 것을 배포할 때는 Apache License 2.0 제4조에 따라
+이 NOTICE 파일의 내용(만든 사람과 출처)을 함께 전달해야 합니다.
+
+시험용 문서 파일의 출처와 라이선스는 tests/fixtures/hwpx/NOTICE.md에 있습니다.
