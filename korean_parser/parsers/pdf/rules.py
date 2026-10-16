@@ -248,3 +248,28 @@ def _dedupe(vals: list[float], gap: float) -> list[float]:
             continue
         out.append(v)
     return out
+
+
+def rule_regions(rules: list[Rule], gap: float = 2.5) -> list[tuple[float, float, float, float]]:
+    """서로 닿는 선끼리 묶은 영역들 (표 후보). 수평선 2개와 수직선 1개 이상이 있는 묶음만."""
+    H = {p: sp for p, sp in _merge_lines([r for r in rules if r.axis == "h"]).items()}
+    V = {p: sp for p, sp in _merge_lines([r for r in rules if r.axis == "v"]).items()}
+    segs = [("h", (a, p - 1, b, p + 1)) for p, sp in H.items() for a, b in sp if b - a > 8]
+    segs += [("v", (p - 1, a, p + 1, b)) for p, sp in V.items() for a, b in sp if b - a > 5]
+    if len(segs) > 3000:  # 그림·눈금이 많은 쪽: 표 찾기를 건너뛴다
+        return []
+    groups: list[list] = []  # [box, h 개수, v 개수]
+    for axis, box in segs:
+        merged = [g for g in groups if _touch(g[0], box, gap)]
+        nh, nv = (axis == "h"), (axis == "v")
+        for g in merged:
+            box = (min(box[0], g[0][0]), min(box[1], g[0][1]), max(box[2], g[0][2]), max(box[3], g[0][3]))
+            nh += g[1]
+            nv += g[2]
+            groups.remove(g)
+        groups.append([box, nh, nv])
+    return [g[0] for g in groups if g[1] >= 2 and g[2] >= 1]
+
+
+def _touch(a, b, gap: float) -> bool:
+    return a[0] - gap <= b[2] and b[0] - gap <= a[2] and a[1] - gap <= b[3] and b[1] - gap <= a[3]

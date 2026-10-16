@@ -38,3 +38,21 @@ def test_generated_space_splits_and_symbols_are_skipped():
              Char(" ", (200, 100, 200, 100), 1.0, False, False, "#000000", "", (200, 100), 0.0),
              ch("중", 96)]
     assert run_texts(chars) == ["항목", "중"]
+
+
+def test_page_order_and_table_continuation_helpers():
+    from korean_parser.ir import Provenance, Row, Table
+    from korean_parser.parsers.pdf import _same_table, _side_by_side
+
+    def blk(page, box, widths=None):
+        return Table(id="t", prov=Provenance(parser="t", page=page, bbox=box), col_widths_pt=widths or [])
+
+    # 한 단 쪽: 위아래로 놓인 블록 / 다단 쪽: 같은 높이에 나란히 놓인 블록
+    assert not _side_by_side([blk(1, (90, 100, 500, 120)), blk(1, (90, 130, 500, 150))])
+    assert _side_by_side([blk(1, (50, 100, 280, 300)), blk(1, (300, 100, 540, 300))])
+    # 쪽을 넘어 이어지는 표: 다음 쪽이고 열 너비가 같다
+    a = blk(3, (84, 600, 517, 780), [108, 108, 108, 108])
+    assert _same_table(a, blk(4, (84, 72, 517, 120), [108, 108, 108.5, 108]))
+    assert not _same_table(a, blk(4, (84, 72, 517, 120), [80, 136, 108, 108]))
+    assert not _same_table(a, blk(5, (84, 72, 517, 120), [108, 108, 108, 108]))
+    assert Row  # noqa: B018

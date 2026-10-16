@@ -133,6 +133,7 @@ metadata(): {"chunk_id": "c31", "heading_path": ["Ⅵ. 제안안내 사항", "2.
 | `korean_parser/normalize.py`, `spacing.py`, `outline.py` | 문자 정규화, 띄어쓰기 복원, 개조식 계층 인식 |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | 설계와 단계별 계획 |
 | [`docs/SCOPE.md`](docs/SCOPE.md) | 이 프로젝트의 범위, 후속 프로젝트로 넘기는 일, 쓰는 쪽과의 약속 |
+| [`benchmarks/eval/`](benchmarks/eval/) | 정답 세트와 요소별 평가 (글자 오류율, 어절 F1, 읽기 순서, 제목, 표 TEDS). Docling 기본 출력과 비교 |
 | [`benchmarks/visual-compare/`](benchmarks/visual-compare/) | 원본 vs HTML 시각 비교 |
 | [`benchmarks/corpus/`](benchmarks/corpus/) | 웹 문서 180개(DOCX 131, HWPX 49) 일괄 실행. 정상 문서 164개 전부 성공. 나라장터 첨부파일 수집 스크립트 |
 | [`benchmarks/korean-postprocess/`](benchmarks/korean-postprocess/) | PDF 띄어쓰기 복원 평가 (F1 0.459 → 0.991) |

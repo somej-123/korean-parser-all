@@ -24,8 +24,8 @@ from ...ir import (
 )
 from ...normalize import is_hangul_syllable, normalize_text
 from ...outline import match_marker
-from .rules import build_grid
-from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, inside_ratio, union
+from .rules import build_grid, rule_regions
+from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, inside_ratio, intersect, union
 
 PARSER_NAME = "pdf-docling"
 _CAPTION = re.compile(r"^[\[<(]?\s*(그림|표|도표|사진|Figure|Fig\.?|Table)\s*[\d IVX]+", re.I)
@@ -55,7 +55,9 @@ def _converter(ocr: bool, lang: str, threads: int, tables: bool = True):
     opts.do_table_structure = tables
     opts.do_ocr = ocr
     if ocr:
-        opts.ocr_options = RapidOcrOptions(lang=[lang], mode=OcrMode.FULL_PAGE)
+        # 글 방향 분류기(cls)는 끈다: 한국어 가로줄을 180도 뒤집힌 것으로 잘못 판단해 줄 전체를 엉뚱한 글자로 읽는다
+        # (정답 세트로 잰 OCR 글자 재현율 0.60 → 0.93). 스캔 문서는 대개 바로 놓여 있다
+        opts.ocr_options = RapidOcrOptions(lang=[lang], mode=OcrMode.FULL_PAGE, use_cls=False)
     conv = DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opts)})
     _CONVERTERS[key] = conv
     return conv
@@ -71,6 +73,35 @@ def parse_pdf(path: str | Path, ocr: bool | None = None, ocr_lang: str = "korean
 
 
 _SENTENCE_END = re.compile(r"([.!?。:;]|[다요음함임됨것][.)]?)\s*$")
+
+
+def _side_by_side(blocks) -> bool:
+    """세로 범위가 겹치면서 가로로는 떨어져 있는 블록 쌍이 있는가 (다단, 나란히 놓인 블록)."""
+    for i, a in enumerate(blocks):
+        ax0, ay0, ax1, ay1 = a.prov.bbox
+        for b in blocks[i + 1:]:
+            bx0, by0, bx1, by1 = b.prov.bbox
+            if min(ay1, by1) - max(ay0, by0) > 2 and (bx0 >= ax1 - 2 or ax0 >= bx1 - 2):
+                return True
+    return False
+
+
+def _row_texts(row) -> list[str]:
+    return [" ".join(getattr(x, "text", "") for x in c.blocks).strip() for c in row.cells]
+
+
+def _same_table(a, b) -> bool:
+    """쪽을 넘어 이어지는 같은 표인가: 다음 쪽 표이고 열 수와 열 너비가 같다."""
+    if not isinstance(b, Table) or not a.prov or not b.prov or b.prov.page != a.prov.page + 1:
+        return False
+    wa, wb = a.col_widths_pt, b.col_widths_pt
+    if not wa or len(wa) != len(wb):
+        return False
+    if any(abs(x - y) > 3 for x, y in zip(wa, wb)):
+        return False
+    if a.prov.bbox and b.prov.bbox and abs(a.prov.bbox[0] - b.prov.bbox[0]) > 6:
+        return False
+    return True
 
 
 def _first_style(p):
@@ -326,7 +357,13 @@ class PdfParser:
             return None
         if not a:
             return text  # Docling이 글을 비워 둔 영역: 텍스트 레이어에 있는 글이 원문이다
-        if a == b or a in b or difflib.SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.9:
+        if a == b or a in b:
+            return text
+        # 같은 글자들이면(순서가 조금 다르거나 몇 글자만 달라도) 텍스트 레이어를 믿는다. 짧은 제목은 한 글자만 달라도
+        # 비율이 크게 떨어지므로 비율 대신 다른 글자 수로 본다
+        sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        same = sum(m.size for m in sm.get_matching_blocks())
+        if max(len(a), len(b)) - same <= max(2, 0.1 * max(len(a), len(b))):
             return text
         return None
 
@@ -351,7 +388,15 @@ class PdfParser:
         parts = text.split(AMBIGUOUS_GAP)
         out = parts[0]
         for part in parts[1:]:
-            out += (" " if out and part and self._space_at_join(out, part) else "") + part
+            if not out or not part:
+                out += part
+                continue
+            lw = out.split()[-1] if out.split() else ""
+            if is_hangul_syllable(out[-1:]) and lw != "제":
+                # 한글 뒤에 오는 숫자·영문은 거의 언제나 새 어절이다 ('시 30분', '산출물은 HWPX와'). '제3조'만 예외
+                out += " " + part
+            else:  # 숫자·영문 뒤의 한글: 단위·조사면 붙이고('30분', 'OCR이'), 낱말이면 띄운다('PDF 기준')
+                out += (" " if self._space_at_join(out, part) else "") + part
         return out
 
     def _space_at_join(self, left: str, right: str) -> bool:
@@ -457,6 +502,10 @@ class PdfParser:
             misplaced.append(self._paragraph(item, page, box))
         for blk in misplaced:
             self._insert_by_position(blk)
+        for n, grid in self._extra_tables:  # Docling이 놓친 괘선 표
+            self._insert_by_position(self._ruled_table(grid, self.pages.page(n)))
+        self._fix_page_order()
+        self._merge_split_tables()
         if not self.ocr:
             self._merge_split_paragraphs()
         self._attach_captions()
@@ -494,6 +543,60 @@ class PdfParser:
     # ------------------------------------------------------------------
     # 끊긴 문단 잇기
     # ------------------------------------------------------------------
+
+    def _fix_page_order(self) -> None:
+        """한 단(段)으로 된 쪽은 블록을 위에서 아래 순서로 놓는다.
+
+        Docling 읽기 순서가 가끔 쪽 위의 표·주석을 아래 문단 뒤에 둔다. 쪽 안에서 나란히 놓인 블록(다단, 옆으로
+        놓인 그림과 글)이 하나도 없으면 위치 순서가 곧 읽기 순서이므로 세로 위치로 다시 정렬한다. 다단 쪽은 그대로 둔다.
+        """
+        blocks = self.doc.blocks
+        out: list[Block] = []
+        page: list[Block] = []
+
+        def flush():
+            located = [b for b in page if b.prov and b.prov.bbox]
+            if len(located) == len(page) and not _side_by_side(located):
+                page.sort(key=lambda b: b.prov.bbox[1])
+            out.extend(page)
+            page.clear()
+
+        for b in blocks:
+            if isinstance(b, PageBreak):
+                flush()
+                out.append(b)
+            else:
+                page.append(b)
+        flush()
+        self.doc.blocks = out
+
+    def _merge_split_tables(self) -> None:
+        """쪽을 넘어가며 둘로 나뉜 표를 하나로 잇는다.
+
+        앞 쪽의 마지막 블록이 표이고 다음 쪽의 첫 블록이 열 수·열 너비가 같은 표면 같은 표다.
+        다음 쪽 표가 머리 행을 되풀이했으면(첫 행 글이 같으면) 그 행은 뺀다.
+        """
+        blocks = self.doc.blocks
+        out: list[Block] = []
+        i = 0
+        while i < len(blocks):
+            b = blocks[i]
+            out.append(b)
+            i += 1
+            while isinstance(b, Table):
+                j = i
+                while j < len(blocks) and isinstance(blocks[j], PageBreak):
+                    j += 1
+                if j == i or j >= len(blocks) or not _same_table(b, blocks[j]):
+                    break
+                nxt = blocks[j]
+                rows = nxt.rows
+                if rows and b.rows and _row_texts(rows[0]) == _row_texts(b.rows[0]):
+                    rows = rows[1:]  # 되풀이한 머리 행
+                b.rows.extend(rows)
+                out.extend(blocks[i:j])  # 쪽 나눔 표시는 이은 표 뒤로
+                i = j + 1
+        self.doc.blocks = out
 
     def _merge_split_paragraphs(self) -> None:
         """한 문단이 둘로 나뉜 곳을 잇는다.
@@ -679,6 +782,7 @@ class PdfParser:
 
         self._ruled: dict[str, object] = {}  # 표 self_ref → Grid 또는 "dup"
         self._ruled_boxes: dict[int, list[BBox]] = {}
+        self._extra_tables = []
         if self.ocr:
             return
         for item, _ in ddoc.iterate_items():
@@ -697,6 +801,37 @@ class PdfParser:
                 continue
             seen.append(gbox)
             self._ruled[item.self_ref] = grid
+        self._find_missed_grids(ddoc)
+
+    def _find_missed_grids(self, ddoc) -> None:
+        """Docling이 표로 찾지 못한 괘선 표를 선만으로 찾는다.
+
+        쪽을 넘어간 표의 짧은 나머지(두세 행)나 서식의 칸 표를 Docling이 표가 아닌 글로 보는 경우가 있다. 이어진 선
+        묶음마다 격자를 만들어 2열 이상이고 글이 든 칸이 둘 이상이면 표로 본다. Docling 표·그림 영역과 겹치는 묶음은
+        건너뛴다 (그림 속 눈금선을 표로 보지 않도록).
+        """
+        from docling_core.types.doc import PictureItem, TableItem
+
+        self._extra_tables: list[tuple[int, object]] = []
+        taken: dict[int, list[BBox]] = {}
+        for item, _ in ddoc.iterate_items():
+            if isinstance(item, (TableItem, PictureItem)) and item.prov:
+                taken.setdefault(item.prov[0].page_no, []).append(self._box(item.prov[0], ddoc))
+        for n in range(1, len(self.pages) + 1):
+            page = self.pages.page(n)
+            blocked = taken.get(n, []) + self._ruled_boxes.get(n, [])
+            for region in rule_regions(page.rules):
+                if any(intersect(region, expand(b, 2)) for b in blocked):
+                    continue
+                grid = build_grid(page.rules, region, pad=1)
+                if grid is None:
+                    continue
+                gbox = (grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1])
+                filled = sum(1 for c in grid.cells if any(ch.text.strip() for ch in page.chars_in(c.box, 0)))
+                if filled < 2 or (grid.n_rows <= 2 and _rows_without_lines(grid, page)):
+                    continue
+                self._ruled_boxes.setdefault(n, []).append(gbox)
+                self._extra_tables.append((n, grid))
 
     @staticmethod
     def _grid_fits(grid, page: PageInfo, box: BBox, docling_rows: int | None) -> bool:

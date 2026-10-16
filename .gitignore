@@ -8,3 +8,6 @@ bench_results/
 build/
 samples_web/
 samples_g2b/
+
+benchmarks/eval/data/
+benchmarks/eval/report.md
