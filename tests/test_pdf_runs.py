@@ -104,3 +104,17 @@ def test_band_order_for_form_rows():
     assert [b.id for b in _band_order(docling, 842)] == ["안내문", "신청고객정보", "표1", "해지사유", "표2"]
     columns = [blk("왼쪽", (50, 100, 280, 700)), blk("오른쪽", (300, 100, 540, 700))]
     assert _band_order(columns, 842) is None
+
+
+def test_heavy_fonts_by_ink_density():
+    # 굵기를 이름의 숫자로만 나누는 글꼴(윤고딕 11·14): 잉크 비율로 굵게를 정한다. 실제 양식에서 잰 값 그대로.
+    # KoPub Medium(0.39)은 본문보다 진해도 0.42에 못 미쳐 굵게가 아니다
+    from collections import Counter
+
+    from korean_parser.parsers.pdf.page import heavy_by_density
+
+    form = {"YDVYGOStd11": [0.31] * 20, "YDVYGOStd14": [0.49] * 20, "YDVYGOStd12": [0.31] * 20}
+    assert heavy_by_density(form, Counter(YDVYGOStd11=1289, YDVYGOStd14=392, YDVYGOStd12=40)) == {"YDVYGOStd14"}
+    light = {"KoPubDotumLight": [0.28] * 20, "KoPubDotumMedium": [0.39] * 20}
+    assert heavy_by_density(light, Counter(KoPubDotumLight=900, KoPubDotumMedium=300)) == set()
+    assert heavy_by_density({"A": [0.5] * 20}, Counter(A=5)) == set()  # 글꼴 하나뿐이면 비교할 본문이 없다

@@ -238,6 +238,15 @@ class PageInfo:
         return buf.getvalue()
 
 
+def heavy_by_density(dens: dict[str, list[float]], count: Counter) -> set[str]:
+    """글꼴별 잉크 비율 표본 → 굵게 볼 글꼴. 본문 글꼴(글자 수가 가장 많은 것)의 1.35배 이상이면서 0.42 이상."""
+    med = {f: statistics.median(v) for f, v in dens.items() if len(v) >= 10}
+    if len(med) < 2:
+        return set()
+    body = max(med, key=lambda f: count[f])
+    return {f for f, d in med.items() if d >= max(med[body] * 1.35, 0.42)}
+
+
 class PdfPages:
     """PDF 전체 페이지의 PageInfo를 필요할 때 만든다."""
 
@@ -248,6 +257,7 @@ class PdfPages:
         self.pdf = pdfium.PdfDocument(self._path)
         self._bg_pdf = None
         self._cache: dict[int, PageInfo] = {}
+        self._heavy: set[str] | None = None
 
     def __len__(self):
         return len(self.pdf)
@@ -257,6 +267,49 @@ class PdfPages:
         if self._bg_pdf is not None:
             self._bg_pdf.close()
         self.pdf.close()
+
+    def heavy_fonts(self, pages: int = 6, per_font: int = 60) -> set[str]:
+        """굵기 정보 없이 굵게 그려지는 글꼴 이름들 (문서마다 한 번 계산).
+
+        굵기를 이름의 숫자로만 나누는 글꼴 묶음이 있다 (윤고딕 'YDVYGOStd11'·'YDVYGOStd14'). 이름에 Bold가 없고 pdfium
+        굵기 값도 모두 400이라 굵게로 보지 못했다. 앞 몇 쪽을 그려 글꼴마다 한글 글자 상자 안 잉크 비율(획 두께)을 재고,
+        본문 글꼴(글자가 가장 많은 글꼴)의 1.35배 이상이면서 0.42 이상인 글꼴을 굵게 본다. 실제 문서에서 잰 값:
+        윤고딕 11(본문) 0.31 · 14 0.49, KoPub 돋움 Medium 0.39 · Bold 0.49.
+        """
+        if self._heavy is not None:
+            return self._heavy
+        self._heavy = set()
+        import numpy as np
+        import pypdfium2.raw as raw
+
+        dens: dict[str, list[float]] = {}
+        count: Counter = Counter()
+        buf, flags = ctypes.create_string_buffer(256), ctypes.c_int()
+        sc = 2.0
+        for n in range(min(len(self.pdf), pages)):
+            page = self.pdf[n]
+            h = page.get_height()
+            tp = page.get_textpage()
+            img = None
+            for i in range(tp.count_chars()):
+                ch = tp.get_text_range(i, 1)
+                if not ("가" <= ch <= "힣"):
+                    continue
+                k = raw.FPDFText_GetFontInfo(tp.raw, i, buf, 256, ctypes.byref(flags))
+                name = buf.value[:k].decode("utf-8", "ignore").split("+")[-1] if k else ""
+                if raw.FPDFText_GetFontWeight(tp.raw, i) >= 600 or any(b in name.lower() for b in _BOLD_NAME):
+                    continue
+                count[name] += 1
+                if len(dens.setdefault(name, [])) >= per_font:
+                    continue
+                if img is None:
+                    img = np.asarray(page.render(scale=sc, grayscale=True).to_pil().convert("L"))
+                left, bottom, right, top = tp.get_charbox(i)
+                crop = img[int((h - top) * sc):int((h - bottom) * sc), int(left * sc):int(right * sc)]
+                if crop.size >= 20:
+                    dens[name].append(float((crop < 200).mean()))
+        self._heavy = heavy_by_density(dens, count)
+        return self._heavy
 
     def background_png(self, number: int, scale: float = 1.5) -> bytes | None:
         """글자를 지운 페이지 그림 (선·상자·색·이미지만). 고정 레이아웃의 바탕으로 쓴다.
@@ -371,7 +424,7 @@ class PdfPages:
                 if any(oz > z and ob[0] <= cx <= ob[2] and ob[1] <= cy <= ob[3]
                        and (img is None or _opaque_image(img, opaque_cache)) for oz, ob, img in occluders):
                     continue  # 나중에 그려진 도형·불투명한 그림에 가려진 글
-            if weight >= 600:
+            if weight >= 600 or fname in self.heavy_fonts():
                 bold = True
             elif not bold and mode == raw.FPDF_TEXTRENDERMODE_FILL_STROKE:
                 bold = True  # 채우기+윤곽선 = 굵은 글꼴이 없을 때 쓰는 '가짜 굵게'
