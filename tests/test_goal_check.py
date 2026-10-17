@@ -29,3 +29,15 @@ def test_running_heads_at_page_edges_count_once():
     pages = [["2장 기준 9", "본문"], ["2장 기준 11", "본문 둘"], ["3장 정의 13", "끝"], ["다른", "더"], ["또", "끝 둘"]]
     assert source_counter(pages)["기"] == 2
     assert source_counter(pages, edges={"2장기준9", "2장기준11", "3장정의13"})["기"] == 1
+
+
+def test_size_limit_warning_is_an_exception_not_a_failure():
+    # 칸 수 제한처럼 일부러 둔 제한에 걸려 경고를 남긴 파일은 기준 1의 예외다 (docs/GOAL.md)
+    from check import report
+
+    rows = [{"file": Path("big.xlsx"), "format": "xlsx", "set": "실제 문서", "chars": 100, "kept": 0.3, "missing": "",
+             "warnings": ["칸이 너무 많아 앞부분 200,000칸만 넣음: data"]}]
+    text = report(rows, [])
+    assert "- 판정: **통과**" in text and "예외 (의도한 크기 제한에 걸려 경고를 남김): 1개" in text
+    rows[0]["warnings"] = ["다른 경고"]
+    assert "- 판정: **미달**" in report(rows, [])

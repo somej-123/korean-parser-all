@@ -47,6 +47,8 @@ SETS = [
 ]
 FORMATS = {".pdf", ".docx", ".hwpx", ".hwp", ".pptx", ".xlsx"}
 KEPT_MIN = 0.99
+# 파서가 일부러 둔 크기 제한의 경고 (docs/GOAL.md 기준 1의 예외). 이 경고가 있는 파일은 0.99 미만이어도 미달이 아니다
+LIMIT_WARNINGS = ("칸이 너무 많아",)
 # 기준 2 (docs/GOAL.md): (대상, 지표, 하위 키, 비교, 기준값)
 STRUCTURE = [
     ("pdf", "cer", None, "<=", 0.01), ("pdf", "eojeol_f1", None, ">=", 0.98), ("pdf", "table_teds", None, ">=", 0.95),
@@ -322,9 +324,16 @@ def structure(skip_eval: bool) -> list[tuple]:
     return out
 
 
+def is_limited(row: dict) -> bool:
+    """의도한 크기 제한에 걸려 경고를 남긴 파일인가 (기준 1의 예외)."""
+    return any(k in w for w in row.get("warnings", []) for k in LIMIT_WARNINGS)
+
+
 def report(rows: list[dict], struct: list[tuple]) -> str:
     measured = [r for r in rows if "kept" in r]
-    below = [r for r in measured if r["kept"] < KEPT_MIN]
+    low = [r for r in measured if r["kept"] < KEPT_MIN]
+    excepted = [r for r in low if is_limited(r)]
+    below = [r for r in low if not is_limited(r)]
     silent = [r for r in below if not r["warnings"]]
     errors = [r for r in rows if "error" in r]
     lines = ["# v1.0 완료 기준 확인 (docs/GOAL.md)", "",
@@ -332,6 +341,7 @@ def report(rows: list[dict], struct: list[tuple]) -> str:
              f"- 파일 {len(rows)}개 (원문 글자를 잰 파일 {len(measured)}개, 건너뛴 파일(스캔·암호화) "
              f"{sum('skip' in r for r in rows)}개, 오류 {len(errors)}개)",
              f"- 보존율 {KEPT_MIN} 미만: {len(below)}개 (그중 경고 없음: {len(silent)}개)",
+             f"- 예외 (의도한 크기 제한에 걸려 경고를 남김): {len(excepted)}개",
              f"- 판정: **{'통과' if not below and not errors else '미달'}**", "",
              "| 묶음 | 파일 | 형식 | 원문 글자 | 보존율 | 경고 | 빠진 글자(많은 순) |",
              "|---|---|---|---:|---:|---|---|"]
@@ -342,7 +352,8 @@ def report(rows: list[dict], struct: list[tuple]) -> str:
         elif "skip" in r:
             lines.append(f"| {r['set']} | {name} | {r['format']} | - | - | {r['skip']} | |")
         else:
-            mark = "" if r["kept"] >= KEPT_MIN else (" ⚠" if r["warnings"] else " ✗ 경고 없음")
+            mark = ("" if r["kept"] >= KEPT_MIN else " 예외(크기 제한)" if is_limited(r)
+                    else " ⚠" if r["warnings"] else " ✗ 경고 없음")
             warn = "; ".join(w[:40] for w in r["warnings"][:3])
             lines.append(f"| {r['set']} | {name} | {r['format']} | {r['chars']} | {r['kept']:.3f}{mark} | {warn} "
                          f"| {r['missing']} |")
