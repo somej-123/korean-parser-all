@@ -3,7 +3,7 @@
 한국어·한글 문서 파서(엔진). 모든 형식을 `parse()` 하나로 받아 통합 문서 모델(IR)로 만들고, 그 모델에서 바로
 HTML(원본 모양)·LLM 텍스트·JSON·검색용 조각을 만든다. 저작권자: 우정호(woojungho). 라이선스: Apache-2.0 (+ NOTICE).
 
-먼저 읽을 것: `docs/HANDOFF.md`(현재 상태와 다음 작업), `docs/SCOPE.md`(범위), `docs/ARCHITECTURE.md`(설계와 형식별 주의점).
+먼저 읽을 것: `docs/GOAL.md`(v1.0 완료 기준과 남은 일, 새 일은 이 기준에 들어가는지 먼저 본다), `docs/HANDOFF.md`(현재 상태와 기록), `docs/SCOPE.md`(범위), `docs/ARCHITECTURE.md`(설계와 형식별 주의점).
 
 ## 범위 (반드시 지킬 것)
 
