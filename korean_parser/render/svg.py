@@ -23,14 +23,16 @@ def _poly(points) -> str:
     return "M" + " L".join(f"{_f(x)},{_f(y)}" for x, y in points) + " Z"
 
 
-def preset_path(geo: str, x: float, y: float, w: float, h: float) -> tuple[str, bool]:
-    """(SVG path d, 근사 여부)."""
+def preset_path(geo: str, x: float, y: float, w: float, h: float, adjust: dict | None = None) -> tuple[str, bool]:
+    """(SVG path d, 근사 여부). adjust: preset 조정값 (100000 = 100%)."""
     r, b = x + w, y + h
     cx, cy = x + w / 2, y + h / 2
     if geo in ("rect", "flowChartProcess", "flowChartPredefinedProcess", "textBox"):
         return _poly([(x, y), (r, y), (r, b), (x, b)]), False
     if geo in ("roundRect", "flowChartAlternateProcess", "flowChartTerminator", "snipRoundRect"):
-        rad = min(w, h) / 2 if geo == "flowChartTerminator" else min(w, h) * 0.1667
+        # 둥근 모서리 반지름 = 짧은 변 × adj (기본 16667 = 1/6, 최대 50000 = 반)
+        adj = min(max((adjust or {}).get("adj", 16667), 0), 50000) / 100000 if geo == "roundRect" else 0.1667
+        rad = min(w, h) / 2 if geo == "flowChartTerminator" else min(w, h) * adj
         return (
             f"M{_f(x + rad)},{_f(y)} H{_f(r - rad)} A{_f(rad)},{_f(rad)} 0 0 1 {_f(r)},{_f(y + rad)} "
             f"V{_f(b - rad)} A{_f(rad)},{_f(rad)} 0 0 1 {_f(r - rad)},{_f(b)} H{_f(x + rad)} "
@@ -151,16 +153,42 @@ def render_drawing(drawing: Drawing, render_blocks, image_src) -> str:
     for i, s in enumerate(drawing.shapes):
         body.append(_render_shape(s, i, markers, render_blocks, image_src))
 
-    defs = "".join(
-        f'<marker id="{mid}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" '
-        f'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/></marker>'
-        for color, mid in markers.items()
-    )
     label = escape(drawing.alt or "도식")
     return (
         f'<svg class="kp-svg" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="{label}" '
         f'viewBox="{_f(min_x)} {_f(min_y)} {_f(vw)} {_f(vh)}" width="{_f(vw)}pt" height="{_f(vh)}pt">'
-        f"<defs>{defs}</defs>{''.join(body)}</svg>"
+        f"<defs>{_marker_defs(markers)}</defs>{''.join(body)}</svg>"
+    )
+
+
+def render_slide(shapes, width: float, height: float, render_blocks, image_src, background: str | None = None,
+                 background_src: str | None = None, label: str = "") -> str:
+    """고정 쪽(PPTX 슬라이드) → <svg>. shapes: (Shape, 화면 강조용 블록 id 또는 None) 목록, 그리는 차례대로.
+
+    도식과 달리 캔버스를 넓히지 않는다: 슬라이드 밖으로 나간 부분은 PowerPoint처럼 잘린다.
+    """
+    markers: dict[str, str] = {}
+    body: list[str] = []
+    if _safe_color(background):
+        body.append(f'<rect x="0" y="0" width="{_f(width)}" height="{_f(height)}" fill="{background}"/>')
+    if background_src:
+        body.append(f'<image href="{escape(background_src)}" x="0" y="0" width="{_f(width)}" height="{_f(height)}" '
+                    'preserveAspectRatio="none"/>')
+    for i, (s, link) in enumerate(shapes):
+        g = _render_shape(s, i, markers, render_blocks, image_src)
+        body.append(f'<g data-kp-id="{escape(link)}">{g}</g>' if link else g)
+    return (
+        f'<svg class="kp-fixed-svg" xmlns="http://www.w3.org/2000/svg" role="document" aria-label="{escape(label)}" '
+        f'viewBox="0 0 {_f(width)} {_f(height)}" width="{_f(width)}pt" height="{_f(height)}pt">'
+        f"<defs>{_marker_defs(markers)}</defs>{''.join(body)}</svg>"
+    )
+
+
+def _marker_defs(markers: dict[str, str]) -> str:
+    return "".join(
+        f'<marker id="{mid}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" '
+        f'orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="{color}"/></marker>'
+        for color, mid in markers.items()
     )
 
 
@@ -183,7 +211,8 @@ def _render_shape(s: Shape, index: int, markers: dict, render_blocks, image_src)
     if s.is_line:
         color = _safe_color(s.stroke) or "#000000"
         d = s.path or line_path(s)
-        mid = markers.setdefault(color, f"kp-arrow-{len(markers)}")
+        # id를 색으로 정한다: 한 HTML에 도식·슬라이드가 여럿이어도 같은 id는 같은 색 화살표라 서로 섞이지 않는다
+        mid = markers.setdefault(color, f"kp-arrow-{color[1:].lower()}")
         m = ""
         if s.tail_arrow:
             m += f' marker-end="url(#{mid})"'
@@ -194,7 +223,7 @@ def _render_shape(s: Shape, index: int, markers: dict, render_blocks, image_src)
         )
     elif s.image_id and (s.path or s.geometry not in ("rect",)):
         # 그림으로 채운 도형: 도형 모양으로 잘라 그림을 넣고 테두리를 그린다
-        d = s.path or preset_path(s.geometry, s.x, s.y, s.width, s.height)[0]
+        d = s.path or preset_path(s.geometry, s.x, s.y, s.width, s.height, s.adjust)[0]
         src = image_src(s.image_id)
         # 같은 경로면 같은 id가 되어도 잘리는 모양이 같으므로 문제없다 (hash()는 실행마다 달라 쓰지 않는다)
         cid = f"kp-clip-{zlib.crc32(d.encode()):08x}"
@@ -217,13 +246,15 @@ def _render_shape(s: Shape, index: int, markers: dict, render_blocks, image_src)
         d = s.path
         approx = False
         if not d:
-            d, approx = preset_path(s.geometry, s.x, s.y, s.width, s.height)
+            d, approx = preset_path(s.geometry, s.x, s.y, s.width, s.height, s.adjust)
         if approx and not s.approximate:
             parts[0] = parts[0].replace(">", ' data-approximate="true">', 1)
         fill = _safe_color(s.fill) or "none"
+        opacity = f' fill-opacity="{_f(s.fill_opacity)}"' if fill != "none" and s.fill_opacity is not None else ""
         stroke = _safe_color(s.stroke) or "none"
         # 0.75pt(1px)보다 얇은 선은 화면에서 흐려지므로 최소 1px로 그린다 (한컴·Word도 그렇게 표시)
-        parts.append(f'<path d="{d}" fill="{fill}" stroke="{stroke}" stroke-width="{_f(max(s.stroke_width_pt, 0.75))}"{dash}/>')
+        parts.append(f'<path d="{d}" fill="{fill}"{opacity} stroke="{stroke}" '
+                     f'stroke-width="{_f(max(s.stroke_width_pt, 0.75))}"{dash}/>')
         if s.geometry == "flowChartPredefinedProcess":
             o = s.width * 0.1
             for xx in (s.x + o, s.x + s.width - o):
@@ -232,6 +263,14 @@ def _render_shape(s: Shape, index: int, markers: dict, render_blocks, image_src)
 
     if s.text_blocks:
         justify = {"top": "flex-start", "middle": "center", "bottom": "flex-end"}[s.text_v_align]
+        css = [f"justify-content:{justify}"]
+        if s.text_insets_pt:
+            css.append("padding:" + " ".join(f"{_f(v)}pt" for v in s.text_insets_pt))
+        if s.text_style:
+            from .html import text_style_css  # html.py가 이 모듈을 불러오므로 여기서 불러온다
+
+            css.append(text_style_css(s.text_style))
+        cls = "kp-shape-text" if s.text_wrap else "kp-shape-text kp-nowrap"
         # SVG 좌표 1단위 = 1pt 이고 화면에서는 1pt = 4/3px 로 늘어난다. 글상자 안 HTML의 pt 글꼴이
         # 다시 4/3배 커지지 않도록, 3/4로 줄인 좌표계에서 4/3배 큰 상자를 그린다.
         k = 4 / 3
@@ -239,7 +278,7 @@ def _render_shape(s: Shape, index: int, markers: dict, render_blocks, image_src)
             f'<foreignObject x="{_f(s.x)}" y="{_f(s.y)}" width="{_f(max(s.width, 1) * k)}" '
             f'height="{_f(max(s.height, 1) * k)}" '
             f'transform="translate({_f(s.x)} {_f(s.y)}) scale(0.75) translate({_f(-s.x)} {_f(-s.y)})">'
-            f'<div xmlns="http://www.w3.org/1999/xhtml" class="kp-shape-text" style="justify-content:{justify}">'
+            f'<div xmlns="http://www.w3.org/1999/xhtml" class="{cls}" style="{escape(";".join(c for c in css if c))}">'
             f"{render_blocks(s.text_blocks)}</div></foreignObject>"
         )
     parts.append("</g>")

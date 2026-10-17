@@ -42,7 +42,7 @@ korean-parser-all은 **문서 파서(엔진)**다. 원문에 있는 것을 빠�
 
 | 약속 | 내용 | 확인 |
 |---|---|---|
-| 형식 버전 | `Document.schema_version` (`ir.IR_VERSION`, 현재 1.3). 필드 추가는 두 번째 자리, 이름·의미 변경은 첫 자리를 올린다 | `tests/test_contract.py` |
+| 형식 버전 | `Document.schema_version` (`ir.IR_VERSION`, 현재 1.4). 필드 추가는 두 번째 자리, 이름·의미 변경은 첫 자리를 올린다 | `tests/test_contract.py` |
 | 결정성 | 같은 파일을 넣으면 블록 id·좌표까지 같은 결과 | `tests/test_contract.py`, `tests/test_pdf.py` |
 | JSON 왕복 | `Document.model_validate_json(doc.model_dump_json()) == doc` | `tests/test_contract.py` |
 | 블록 id | 문서 안에서 유일. HTML `data-kp-id`, LLM 텍스트 `<!-- b12 -->`, 조각의 `block_ids`가 같은 값 | `tests/test_contract.py` |

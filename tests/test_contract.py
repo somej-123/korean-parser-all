@@ -9,7 +9,7 @@ from korean_parser.parsers import parse
 
 FIX = Path(__file__).parent / "fixtures"
 FILES = [FIX / "korean_report.docx", FIX / "hwpx" / "rfp_example.hwpx", FIX / "hwpx" / "project_plan.hwpx",
-         FIX / "hwpx" / "container.hwpx"]
+         FIX / "hwpx" / "container.hwpx", FIX / "sample_layout.pptx", FIX / "sample_diagram.pptx"]
 
 
 @pytest.mark.parametrize("path", FILES, ids=lambda p: p.name)

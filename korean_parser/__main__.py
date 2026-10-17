@@ -29,7 +29,7 @@ def main(argv=None) -> int:
     c.add_argument("--max-tokens", type=int, default=500, help="chunks: 조각 하나의 토큰 상한 (어림값)")
     c.add_argument("--no-korean", action="store_true", help="한국어 처리 레이어 끄기")
     c.add_argument("--layout", choices=["auto", "flow", "fixed"], default="auto",
-                   help="HTML 배치: auto(기본), flow(문서 흐름형), fixed(원본 쪽 모양, PDF만)")
+                   help="HTML 배치: auto(기본), flow(문서 흐름형), fixed(원본 쪽 모양, PDF·PPTX)")
     args = p.parse_args(argv)
 
     formats = {f.strip() for f in args.formats.split(",") if f.strip()}

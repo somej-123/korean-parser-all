@@ -191,3 +191,88 @@ def test_connected_shapes_become_one_drawing():
     # 도식에 들어간 글은 따로 문단으로 나오지 않고, 이어지지 않은 장식 사각형은 경고만
     assert [b.text for b in doc.blocks if isinstance(b, Paragraph)] == ["메뉴구조도"]
     assert any("장식" in w for w in doc.warnings) and flow.shapes
+
+
+# -- 원래 배치 화면 (고정 쪽) ------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def layout():
+    return parse(FIX / "sample_layout.pptx")
+
+
+def test_fixed_slide_draws_shapes_in_order_with_background(layout):
+    # 슬라이드마다 고정 쪽 하나. 마스터의 장식 띠가 맨 아래, 그다음 슬라이드 도형을 원본 그리는 차례대로
+    assert len(layout.fixed_pages) == layout.meta.page_count == 1
+    fp = layout.fixed_pages[0]
+    assert (fp.page, fp.width_pt, fp.height_pt, fp.background) == (1, 720.0, 540.0, "#F5F3EE")
+    band, card, box, clear, table = fp.shapes
+    assert band.fill == "#1E2761" and band.width == 720 and not band.block_ids  # 마스터 도형은 본문에 넣지 않는다
+    assert card.geometry == "roundRect" and card.adjust == {"adj": 5000} and card.fill == "#FBEAEA"
+    # 글이 있는 도형은 본문 블록을 id로 가리킨다 (같은 글을 두 번 담지 않는다)
+    by_id = {b.id: b for b in layout.blocks}
+    assert [by_id[i].text for i in box.block_ids] == ["클라우드 AI", "외부 서버로 전송"]
+    assert isinstance(by_id[table.block_ids[0]], Table)
+    assert clear.fill is None  # 완전히 투명한(alpha 0) 채우기는 없는 것으로
+
+
+def test_fixed_slide_text_box_properties(layout):
+    box = layout.fixed_pages[0].shapes[2]
+    assert box.text_insets_pt == (0, 0, 0, 0) and box.text_wrap is False
+    # 크기가 없는 런은 마스터 otherStyle(18pt)과 테마 글꼴을 물려받는다. 본문 블록에는 넣지 않는다
+    assert box.text_style.size_pt == 18 and box.text_style.font == "맑은 고딕"
+    first, second = (b for b in layout.blocks if isinstance(b, Paragraph) and b.prov.bbox[1] == 120)
+    assert first.inlines[0].style is None or first.inlines[0].style.size_pt is None
+    # 슬라이드에 적힌 문단 모양(줄 간격, 문단 앞 간격)과 자간은 본문 블록에 그대로
+    assert (second.style.line_spacing, second.style.space_before_pt) == (1.2, 6)
+    assert second.inlines[0].style.letter_spacing_em == pytest.approx(0.1)
+
+
+def test_table_style_borders_come_from_file(layout):
+    # 칸에 선이 없으면 표 스타일(tableStyles.xml)의 전체 표 선을 쓴다 (실제 화면설계서의 표 43개)
+    t = next(b for b in layout.blocks if isinstance(b, Table))
+    b = t.rows[0].cells[0].borders
+    assert (b.top.color, b.left.color, b.right.color) == ("#9E9E9E",) * 3
+    assert t.cell_padding_pt == (3.6, 7.2, 3.6, 7.2)  # PowerPoint 기본 칸 여백
+
+
+def test_fixed_slide_html_and_flow_unchanged(layout):
+    from korean_parser.render.html import render_html
+
+    html = render_html(layout)  # 고정 쪽이 있으면 기본이 원래 배치
+    assert 'class="kp-fixed-page kp-fixed-slide" data-page="1"' in html and 'fill="#F5F3EE"' in html
+    box = layout.fixed_pages[0].shapes[2]
+    assert f'data-kp-id="{box.block_ids[0]}"' in html  # 화면 강조가 본문 블록 id로 이어진다
+    assert "kp-nowrap" in html and "padding:0pt 0pt 0pt 0pt" in html
+    flow = render_html(layout, layout="flow")
+    assert 'class="kp-fixed-page' not in flow and 'data-kp-id="b1"' in flow
+
+
+def test_fixed_slide_keeps_text_dropped_from_body(plain):
+    # 되풀이되어 꼬리말로 한 번만 옮긴 바닥글과 버린 쪽 번호도 원래 배치 화면에는 슬라이드마다 그린다
+    def texts(fp):
+        by_id = {b.id: b for b in plain.blocks + plain.footer}
+        out = []
+        for s in fp.shapes:
+            out += [getattr(by_id[i], "text", "") for i in s.block_ids] + [b.text for b in s.text_blocks]
+        return out
+
+    assert all("내부 검토용 자료" in texts(fp) for fp in plain.fixed_pages)
+    assert [t for fp in plain.fixed_pages for t in texts(fp) if "/ 4" in t] == ["1 / 4", "2 / 4", "3 / 4", "4 / 4"]
+    # 본문에 없는 글은 id 없이 담는다 (본문 블록 id와 겹치지 않게)
+    assert all(not b.id for fp in plain.fixed_pages for s in fp.shapes for b in s.text_blocks)
+
+
+def test_fixed_slide_draws_diagram_members_in_place():
+    # 도식은 한 덩어리가 아니라 구성 도형마다 원래 차례에 그린다 (사이에 놓인 배경 도형이 글을 덮지 않게).
+    # 상자 글은 도식 안 문단 id를 가리킨다
+    from korean_parser.ir import Drawing, walk_blocks
+
+    doc = parse(FIX / "sample_diagram.pptx")
+    drawing_ids = {b.id for b in doc.blocks if isinstance(b, Drawing)}
+    shapes = doc.fixed_pages[0].shapes
+    assert not any(i in drawing_ids for s in shapes for i in s.block_ids)
+    inner = {b.id: b for b in walk_blocks(doc.blocks)}
+    labels = [inner[i].text for s in shapes for i in s.block_ids]
+    assert {"산업안전", "안전교육", "교육현황", "접수", "처리"} <= set(labels)
+    assert sum(s.is_line for s in shapes) == 3 and any(s.tail_arrow for s in shapes)

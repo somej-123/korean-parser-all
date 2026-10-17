@@ -13,10 +13,10 @@ from html import escape
 
 from ..ir import (
     Block, Equation, Border, Borders, Break, Chart, Document, Drawing, Figure, Heading, ImageRef, NoteRef,
-    PageBreak, Paragraph, ParagraphStyle, Tab, Table, Text, TextStyle,
+    PageBreak, Paragraph, ParagraphStyle, Tab, Table, Text, TextStyle, walk_blocks,
 )
 from .chart_svg import render_chart_svg
-from .svg import render_drawing
+from .svg import render_drawing, render_slide
 
 _HEX = re.compile(r"^#[0-9A-Fa-f]{6}$")
 _SAFE_FONT = re.compile(r"^[\w\s가-힣ㄱ-ㅎ.\-,']{1,64}$")
@@ -74,6 +74,15 @@ body { margin: 0; padding: 24px 12px; background: #e9e9ec; color: #000; }
   box-shadow: 0 1px 3px rgba(0,0,0,.15), 0 4px 16px rgba(0,0,0,.08); }
 .kp-fixed-svg { display: block; width: 100%; height: auto; }
 .kp-fixed-svg text { white-space: pre; }
+/* PPTX 슬라이드: 도형 안 글은 HTML로 흐르게 두되 PowerPoint처럼 상자 밖으로 넘친 글도 보인다 */
+.kp-fixed-slide { font-size: 18pt; line-height: 1.2; }
+.kp-fixed-slide foreignObject, .kp-fixed-slide .kp-shape-text { overflow: visible; }
+.kp-fixed-slide p, .kp-fixed-slide h1, .kp-fixed-slide h2, .kp-fixed-slide h3, .kp-fixed-slide h4,
+.kp-fixed-slide h5, .kp-fixed-slide h6 { margin: 0; font-size: inherit; font-weight: inherit; white-space: pre-wrap;
+  word-break: keep-all; overflow-wrap: anywhere; }
+.kp-fixed-slide .kp-nowrap p, .kp-fixed-slide .kp-nowrap h1 { white-space: pre; }
+.kp-fixed-slide .kp-figure, .kp-fixed-slide .kp-drawing, .kp-fixed-slide .kp-chart { margin: 0; }
+.kp-fixed-slide .kp-drawing .kp-svg { max-width: none; }
 g.kp-highlight text { fill: #b45309; }
 [data-kp-id].kp-highlight { outline: 2px solid #f5a623; outline-offset: 2px; background: #fff7e0; }
 """
@@ -207,7 +216,9 @@ class HtmlRenderer:
     def __init__(self, doc: Document, standalone: bool = True, layout: str = "auto"):
         self.doc = doc
         self.standalone = standalone
-        # auto: 고정 쪽(PDF)이 있으면 원본 모양 그대로(fixed), 없으면 흐름형(flow)
+        self._by_id: dict | None = None  # 블록 id → 블록 (고정 쪽 슬라이드가 본문 블록을 가리킬 때)
+        self._slide = False  # 슬라이드 도형 안을 그리는 중
+        # auto: 고정 쪽(PDF, PPTX)이 있으면 원본 모양 그대로(fixed), 없으면 흐름형(flow)
         self.layout = ("fixed" if doc.fixed_pages else "flow") if layout == "auto" else layout
         if self.layout == "fixed" and not doc.fixed_pages:
             self.layout = "flow"
@@ -269,6 +280,9 @@ class HtmlRenderer:
     def _fixed_pages(self) -> str:
         pages = []
         for fp in self.doc.fixed_pages:
+            if fp.shapes and not fp.runs:
+                pages.append(self._fixed_slide(fp))
+                continue
             w, h = fp.width_pt, fp.height_pt
             parts = [f'<svg class="kp-fixed-svg" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w:.2f} {h:.2f}" '
                      f'width="{w:.2f}pt" height="{h:.2f}pt" role="document" aria-label="{fp.page}쪽">']
@@ -300,6 +314,29 @@ class HtmlRenderer:
             parts.append("</svg>")
             pages.append(f'<article class="kp-fixed-page" data-page="{fp.page}" style="width:{w:.2f}pt">{"".join(parts)}</article>')
         return "".join(pages)
+
+    def _fixed_slide(self, fp) -> str:
+        """PPTX 슬라이드: 도형을 그리는 차례대로 원래 위치에 그린다. 글이 있는 도형은 가리키는 본문 블록을 그 상자 안에
+        HTML로 그리므로, 화면 강조(data-kp-id)가 흐름 배치와 같은 블록 id로 이어진다."""
+        if self._by_id is None:
+            doc = self.doc
+            self._by_id = {b.id: b for b in walk_blocks(doc.blocks + doc.header + doc.footer) if getattr(b, "id", "")}
+        shapes = []
+        for s in fp.shapes:
+            if s.image_id:  # 그림: 도형이 직접 그리고, 강조용으로 그 Figure 블록 id를 단다
+                shapes.append((s, s.block_ids[0] if s.block_ids else None))
+                continue
+            blocks = [self._by_id[i] for i in s.block_ids if i in self._by_id] + list(s.text_blocks)
+            shapes.append((s.model_copy(update={"text_blocks": blocks}) if s.block_ids else s, None))
+        bg = self._image_src(fp.background_image_id) if fp.background_image_id else None
+        self._slide = True
+        try:
+            svg = render_slide(shapes, fp.width_pt, fp.height_pt, self.blocks, self._image_src, fp.background, bg,
+                               label=f"{fp.page}쪽")
+        finally:
+            self._slide = False
+        return (f'<article class="kp-fixed-page kp-fixed-slide" data-page="{fp.page}" '
+                f'style="width:{fp.width_pt:.2f}pt">{svg}</article>')
 
     # ------------------------------------------------------------------
     # 블록
@@ -393,7 +430,15 @@ class HtmlRenderer:
             hanging = style is not None and (style.indent_first_pt or 0) < 0
             width = f' style="min-width:{_pt(-style.indent_first_pt)}"' if hanging else ""
             marker = f'<span class="kp-marker"{width}>{escape(list_info.marker)}</span>'
-        return f"<{tag}{self._id(b)}{_attr('style', paragraph_css(style))}>{marker}{self.inlines(inlines)}</{tag}>"
+        css = paragraph_css(style)
+        if self._slide:
+            # 줄 높이(배수)는 문단 자신의 글자 크기로 계산된다. 상자 기본 크기(18pt)가 남아 있으면 작은 글자 줄이
+            # 벌어지므로, PowerPoint처럼 그 문단의 가장 큰 글자 크기를 문단 크기로 둔다
+            size = max((i.style.size_pt for i in inlines if isinstance(i, Text) and i.style and i.style.size_pt),
+                       default=None)
+            if size:
+                css = f"font-size:{_pt(size)}" + (";" + css if css else "")
+        return f"<{tag}{self._id(b)}{_attr('style', css)}>{marker}{self.inlines(inlines)}</{tag}>"
 
     def inlines(self, inlines) -> str:
         out = []
@@ -508,5 +553,5 @@ class HtmlRenderer:
 
 
 def render_html(doc: Document, standalone: bool = True, layout: str = "auto") -> str:
-    """layout: auto(기본), flow(문서 흐름형), fixed(원본 쪽 모양 그대로, PDF만)."""
+    """layout: auto(기본), flow(문서 흐름형), fixed(원본 쪽 모양 그대로, PDF·PPTX)."""
     return HtmlRenderer(doc, standalone=standalone, layout=layout).render()

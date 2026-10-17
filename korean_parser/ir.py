@@ -19,7 +19,7 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 
-IR_VERSION = "1.3"  # 1.2: Paragraph.heading_guess, 1.3: Image.converted_from
+IR_VERSION = "1.4"  # 1.2: Paragraph.heading_guess, 1.3: Image.converted_from, 1.4: FixedPage.shapes (PPTX 슬라이드)
 
 
 class _Model(BaseModel):
@@ -230,6 +230,7 @@ class Shape(_Model):
     id: str | None = None
     name: str | None = None
     geometry: str = "rect"  # rect, ellipse, line, rightArrow, ... (OOXML preset 이름)
+    adjust: dict[str, float] | None = None  # 1.4: preset 조정값 (avLst의 adj 등, 100000 = 100%). 둥근 모서리 크기 등
     path: str | None = None  # 사용자 정의 도형: SVG path (캔버스 좌표)
     x: float = 0
     y: float = 0
@@ -239,6 +240,7 @@ class Shape(_Model):
     flip_h: bool = False
     flip_v: bool = False
     fill: str | None = None
+    fill_opacity: float | None = None  # 1.4: 채우기 불투명도 (0~1, None = 1)
     stroke: str | None = None
     stroke_width_pt: float = 0.75
     stroke_dash: Literal["solid", "dashed", "dotted"] = "solid"
@@ -250,6 +252,12 @@ class Shape(_Model):
     text_v_align: Literal["top", "middle", "bottom"] = "middle"
     image_id: str | None = None  # 그림 도형
     approximate: bool = False  # 원본 도형을 정확히 그리지 못하고 근사했는지
+    # 1.4: 고정 쪽(FixedPage.shapes)에서 쓰는 값
+    # 이 도형 자리에 그릴 본문 블록 id (글상자 문단, 표, 차트). 그림 도형(image_id)은 그 Figure 블록 id (화면 강조용)
+    block_ids: list[str] = Field(default_factory=list)
+    text_style: TextStyle | None = None  # 글상자 글의 기본 모양 (런에 값이 없을 때 물려받는 크기·색·글꼴)
+    text_insets_pt: tuple[float, float, float, float] | None = None  # 글상자 안쪽 여백 (위, 오른쪽, 아래, 왼쪽)
+    text_wrap: bool = True  # False면 상자 너비에서 줄을 바꾸지 않는다
 
     @property
     def is_line(self) -> bool:
@@ -405,16 +413,21 @@ class TextRun(_Model):
 
 
 class FixedPage(_Model):
-    """원본과 같은 모양으로 보여 주기 위한 쪽: 글자를 뺀 바탕 그림 + 원래 위치의 글 조각.
+    """원본과 같은 모양으로 보여 주기 위한 쪽. 의미 구조(blocks)와 별개로 화면 재현용이다.
 
-    PDF처럼 쪽 배치가 정해진 문서에서 쓴다. 의미 구조(blocks)와 별개로 화면 재현용이다.
+    PDF: 글자를 뺀 바탕 그림 + 원래 위치의 글 조각(runs).
+    PPTX: 슬라이드의 도형을 그리는 차례(원본 z 순서)대로 담은 shapes. 좌표는 슬라이드 기준(pt).
+    글이 있는 도형은 block_ids로 본문 블록을 가리킨다 (같은 글을 두 번 담지 않는다). 본문에서 빠진 글(되풀이되어
+    꼬리말로 한 번만 옮긴 바닥글, 쪽 번호 등)은 블록이 없으므로 text_blocks에 직접 담는다 (id 없음).
     """
 
     page: int
     width_pt: float
     height_pt: float
+    background: str | None = None  # 쪽 바탕색 (1.4)
     background_image_id: str | None = None
     runs: list[TextRun] = Field(default_factory=list)
+    shapes: list[Shape] = Field(default_factory=list)  # 1.4
 
 
 class Document(_Model):
@@ -433,6 +446,11 @@ class Document(_Model):
     def iter_blocks(self):
         """본문의 모든 블록을 표 셀과 글상자 안까지 깊이 우선으로 순회한다."""
         yield from _walk(self.blocks)
+
+
+def walk_blocks(blocks):
+    """블록 목록(머리말·꼬리말 등)을 표 셀과 글상자 안까지 깊이 우선으로 순회한다."""
+    yield from _walk(blocks)
 
 
 def _walk(blocks):
@@ -462,6 +480,7 @@ def inline_text(inlines) -> str:
 ParagraphStyle.model_rebuild()
 Cell.model_rebuild()
 Shape.model_rebuild()
+FixedPage.model_rebuild()
 Table.model_rebuild()
 Drawing.model_rebuild()
 Document.model_rebuild()
