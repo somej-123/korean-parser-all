@@ -124,3 +124,35 @@ def test_real_rfp_example():
                for t in tables for r in t.rows for c in r.cells)
     html = render_html(doc)
     assert "rowspan=\"11\"" in html
+
+
+def test_caption_memo_and_master_page(tmp_path):
+    # v1.0 기준 1(빠짐없이)에서 찾은 것: 개체 캡션 글은 개체 안이 아니라 hp:caption에 있어 경고 없이 빠졌고
+    # (hwpxlib SimpleRectangle '그림'), 메모(fieldBegin MEMO)와 바탕쪽의 글도 알리지 않고 빠졌다.
+    # 캡션은 개체 뒤 문단으로 읽고, 메모·바탕쪽은 v1.0에서 읽지 않는 대신 경고를 남긴다
+    import re
+    import zipfile
+
+    src = FIX / "simple_table.hwpx"
+    out = tmp_path / "caption.hwpx"
+    hp = 'xmlns:hp="http://www.hancom.co.kr/hwpml/2011/paragraph"'
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(out, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "Contents/section0.xml":
+                xml = data.decode("utf-8")
+                cap = ('<hp:caption side="BOTTOM"><hp:subList><hp:p><hp:run><hp:t>표 1. 시험 표</hp:t></hp:run></hp:p>'
+                       '</hp:subList></hp:caption>')
+                xml = re.sub(r"(<hp:tbl\b[^>]*>)", r"\1" + cap, xml, count=1)
+                memo = ('<hp:ctrl><hp:fieldBegin type="MEMO"><hp:subList><hp:p><hp:run><hp:t>메모 글</hp:t></hp:run>'
+                        '</hp:p></hp:subList></hp:fieldBegin></hp:ctrl>')
+                xml = xml.replace("<hp:t>", memo + "<hp:t>", 1)
+                data = xml.encode("utf-8")
+            zout.writestr(item, data)
+        zout.writestr("Contents/masterpage0.xml",
+                      f'<hm:masterPage xmlns:hm="http://www.hancom.co.kr/hwpml/2011/master-page" {hp}>'
+                      '<hp:subList><hp:p><hp:run><hp:t>바탕쪽 글</hp:t></hp:run></hp:p></hp:subList></hm:masterPage>')
+    doc = parse(out)
+    i = next(k for k, b in enumerate(doc.blocks) if isinstance(b, Table))
+    assert doc.blocks[i + 1].text == "표 1. 시험 표"
+    assert "메모(한글 메모)의 글은 넣지 않음" in doc.warnings and "바탕쪽의 글은 넣지 않음" in doc.warnings

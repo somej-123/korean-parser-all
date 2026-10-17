@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import posixpath
+import re
 import zipfile
 from pathlib import Path
 
@@ -95,6 +96,12 @@ class HwpxParser:
                 self._warn(f"섹션 파일 없음: {part}")
                 continue
             self.doc.blocks.extend(self._paragraphs(root))
+        # 바탕쪽(Contents/masterpageN.xml)은 아직 읽지 않는다. 글이 있으면 알린다 (기준 문서 묶음의 바탕쪽은 모두 글이 없었다)
+        for name in getattr(self, "names", []):
+            if re.match(r"Contents/masterpage\d+\.xml$", name):
+                root = self._xml(name)
+                if root is not None and any((t.text or "").strip() for t in root.iter() if ln(t) == "t"):
+                    self._warn("바탕쪽의 글은 넣지 않음")
         self.zip.close()
         return self.doc
 
@@ -245,6 +252,7 @@ class HwpxParser:
                 self._ctrl(el, inlines, state)
             elif name == "tbl":
                 after.append(self._table(el))
+                self._caption(el, after)
             elif name == "equation":
                 script = kid(el, "script")
                 if script is not None and script.text:
@@ -334,6 +342,9 @@ class HwpxParser:
                 cmd = next((p.text for p in c.iter() if ln(p) == "stringParam" and p.get("name") == "Command"), "")
                 url = (cmd or "").replace("\\:", ":").replace("\\\\", "\\").split(";")[0].strip()
                 state["link"] = url or None
+            elif name == "fieldBegin" and c.get("type") == "MEMO":
+                # 메모(한글 메모)는 본문이 아니다. v1.0에서는 읽지 않고 알린다 (docs/GOAL.md 'v1.0 이후')
+                self._warn("메모(한글 메모)의 글은 넣지 않음")
             elif name == "fieldEnd":
                 state["link"] = None
             elif name in ("header", "footer"):
@@ -438,6 +449,7 @@ class HwpxParser:
             image_id = self._image_id(img.get("binaryItemIDRef")) if img is not None else None
             if image_id:
                 inlines.append(ImageRef(image_id=image_id, width_pt=w, height_pt=h, alt=alt))
+            self._caption(el, after)  # 글자처럼 놓인 그림의 캡션: 문단 뒤
             return
 
         shapes = self.shapes.read(el) if name != "ole" else self.shapes.read(_as_pic(el))
@@ -446,12 +458,40 @@ class HwpxParser:
         drawing = Drawing(id=self._new_id(), prov=self._prov(), width_pt=w, height_pt=h, shapes=shapes, alt=alt)
         if inline:
             after.append(drawing)
+            self._caption(el, after)
             return
         drawing.anchor = self._anchor(el, pos)
-        if drawing.anchor.wrap == "top_bottom":
-            after.append(drawing)
+        slot = after if drawing.anchor.wrap == "top_bottom" else before
+        slot.append(drawing)
+        self._caption(el, slot)
+
+    def _caption(self, el, slot) -> None:
+        """개체 캡션(hp:caption의 글)을 개체 바로 뒤(위쪽 캡션이면 바로 앞) 문단으로 둔다.
+
+        캡션 글은 개체 안이 아니라 hp:caption/hp:subList에 있다. 읽지 않으면 '그림 1. …' 같은 글이 경고 없이 빠졌다
+        (hwpxlib SimpleRectangle). 문단으로 두면 표·그림·도식 어느 개체든 같은 방식으로 남는다.
+        """
+        cap = kid(el, "caption")
+        sub = kid(cap, "subList") if cap is not None else None
+        if sub is None:
+            return
+        blocks = [b for b in self._paragraphs(sub) if not isinstance(b, Paragraph) or b.text.strip()]
+        if not blocks:
+            return
+        if cap.get("side", "BOTTOM") == "TOP":
+            obj = slot.pop()
+            at = slot.at.pop() if hasattr(slot, "at") else None
+            for b in blocks:
+                slot.append(b)
+            slot.append(obj)
+            if at is not None:  # 위치 기억(_Slot.at)은 개체가 놓였던 자리 그대로
+                slot.at[-len(blocks) - 1:] = [at] * (len(blocks) + 1)
         else:
-            before.append(drawing)
+            at = slot.at[-1] if hasattr(slot, "at") and slot.at else None
+            for b in blocks:
+                slot.append(b)
+            if at is not None:
+                slot.at[-len(blocks):] = [at] * len(blocks)
 
     def _anchor(self, el, pos) -> Anchor:
         wrap_attr = el.get("textWrap", "SQUARE")

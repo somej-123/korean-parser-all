@@ -84,6 +84,10 @@ class DocxParser:
         sect = child(body, "w:sectPr")
         self._read_section(sect)
         self._read_notes()
+        comments = self._xml("word/comments.xml")
+        if comments is not None and len(comments):
+            # 메모는 본문이 아니다. v1.0에서는 읽지 않고 알린다 (docs/GOAL.md 'v1.0 이후')
+            self._warn(f"Word 메모 {len(comments)}개의 글은 넣지 않음")
         self.zip.close()
         return doc
 
