@@ -130,13 +130,39 @@ def truth_for(spec: dict, path: Path) -> list[dict]:
     shown = "".join(src[i].get_textpage().get_text_range() for i in range(n)).replace(" ", "").replace("\r\n", "")
     shown = norm(shown).replace(" ", "")
 
-    def visible(b):
-        text = norm(b["rows"][0][0]["text"] if b["type"] == "table" else b["text"]).replace(" ", "")
-        return text[:20] in shown
+    def row_text(row) -> str:
+        return norm(" ".join(c["text"] for c in row)).replace(" ", "")
 
-    # 마지막으로 보이는 블록까지 (쪽 끝에서 잘린 블록은 포함)
-    last = max((i for i, b in enumerate(blocks) if visible(b)), default=-1)
-    return blocks[: last + 1]
+    # 블록을 문서 순서대로 따라가며 그림에 보이는 쪽 글(shown)에서 찾는다. 앞에서 찾은 자리 뒤에서만 찾으므로, 4쪽 표의
+    # 머리 행('구분 내용 비고')이 앞쪽 다른 표에도 있어도 보인다고 잘못 보지 않는다
+    cursor, found, rows_of = 0, [], {}
+    for i, b in enumerate(blocks):
+        if b["type"] == "table":
+            # 표는 그림에 보이는 행까지만 정답으로 둔다. 3쪽 끝에서 잘린 표의 나머지 행(4쪽)을 정답에 두면, 보이는
+            # 부분을 다 맞게 읽어도 점수가 깎였다 (v0.13.2 합성 스캔 표 TEDS 0.820의 감점 대부분)
+            rows = []
+            for row in b["rows"]:
+                k = shown.find(row_text(row)[:20], cursor)
+                if k < 0:
+                    break
+                rows.append(row)
+                cursor = k
+            if rows:
+                found.append(i)
+                rows_of[i] = rows
+        else:
+            k = shown.find(norm(b["text"]).replace(" ", "")[:20], cursor)
+            if k >= 0:
+                found.append(i)
+                cursor = k
+    # 마지막으로 보이는 블록까지 (쪽 끝에서 잘린 문단은 포함, 중간에 못 찾은 블록도 둔다)
+    last = max(found, default=-1)
+    out = []
+    for i, b in enumerate(blocks[: last + 1]):
+        if b["type"] == "table" and i in rows_of:
+            b = {**b, "rows": rows_of[i]}
+        out.append(b)
+    return out
 
 
 # ---------------------------------------------------------------------------
