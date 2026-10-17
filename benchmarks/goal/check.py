@@ -40,6 +40,7 @@ SETS = [
     ("공개 시험 문서", ROOT / "benchmarks" / "corpus" / "samples_web" / "hwpxlib"),
     ("공개 시험 문서", ROOT / "benchmarks" / "corpus" / "samples_web" / "hwplib"),
     ("공개 시험 문서", ROOT / "benchmarks" / "corpus" / "samples_web" / "poi"),
+    ("표본 문서", ROOT / "benchmarks" / "goal" / "samples"),
     ("저장소 시험 파일", ROOT / "tests" / "fixtures"),
     ("저장소 시험 파일", ROOT / "benchmarks" / "docling-cpu" / "samples"),
 ]
@@ -312,8 +313,34 @@ def report(rows: list[dict], struct: list[tuple]) -> str:
         lines += [f"| {' | '.join(map(str, s))} |" for s in struct]
     else:
         lines.append("(--skip-eval: 재지 않음)")
-    lines += ["", "기준 3(필수 요소)과 기준 4(약속)는 `docs/GOAL.md`의 남은 일과 `tests/test_contract.py`로 확인한다."]
+    lines += ["", "## 기준 3. 필수 요소", ""]
+    lines += elements_report()
+    lines += ["", "기준 4(약속)는 `tests/test_contract.py`로 확인한다."]
     return "\n".join(lines) + "\n"
+
+
+def elements_report() -> list[str]:
+    """표본 문서(benchmarks/goal/samples)마다 '들어 있어야 할 요소 목록'을 파서 결과와 맞춰 본다."""
+    import json
+
+    from elements import check
+
+    folder = ROOT / "benchmarks" / "goal" / "samples"
+    rows, total, passed = [], 0, 0
+    for manifest in sorted(folder.glob("*.json")):
+        doc_path = next((p for p in folder.glob(manifest.stem + ".*") if p.suffix != ".json"), None)
+        if doc_path is None:
+            continue
+        results = check(parse(doc_path), json.loads(manifest.read_text(encoding="utf-8")))
+        bad = [r for r in results if not r[1]]
+        total += len(results)
+        passed += len(results) - len(bad)
+        rows.append(f"| {doc_path.name} | {len(results) - len(bad)} / {len(results)} | "
+                    + "; ".join(f"{k}: {d}" for k, _, d in bad)[:300] + " |")
+    if not rows:
+        return ["(표본 문서 없음: benchmarks/goal/samples/make_*.py로 만든다)"]
+    return [f"- 요소 {total}개 중 {passed}개 통과, 판정: **{'통과' if passed == total else '미달'}**", "",
+            "| 표본 | 통과 | 못 찾은 요소 |", "|---|---:|---|", *rows]
 
 
 def main() -> int:

@@ -12,10 +12,12 @@ from pathlib import Path
 from lxml import etree
 
 from ...ir import (
-    Anchor, Block, Break, Cell, Document, Drawing, Heading, ImageRef, Image, ListInfo, Meta, Note,
+    Anchor, Block, Break, Cell, Document, Drawing, Equation, Heading, ImageRef, Image, ListInfo, Meta, Note,
     NoteRef, PageBreak, PageSetup, Paragraph, Provenance, Row, Shape, Tab, Table, Text,
 )
 from .common import NS, child, emu_to_pt, hex_color, on_off, q, twips_to_pt, wattr
+from .omml import M as OMML
+from .omml import omml_to_latex
 from .drawing import chart_ref, ShapeReader, Theme, read_chart, read_dsp_drawing
 from .numbering import Numbering
 from .symbols import map_symbol
@@ -323,6 +325,12 @@ class DocxParser:
             elif tag == q("mc:AlternateContent"):
                 choice = kid.find(q("mc:Choice"))
                 self._walk_inlines(choice if choice is not None else kid, para_rpr, link, out, floats, state)
+            elif tag in (f"{OMML}oMath", f"{OMML}oMathPara"):
+                # 수식(OMML) → LaTeX 문자열. 수식 문단(oMathPara)은 안의 수식마다
+                for m in ([kid] if tag == f"{OMML}oMath" else kid.findall(f"{OMML}oMath")):
+                    script = omml_to_latex(m).strip()
+                    if script:
+                        out.append(Equation(script=script))
             # w:del(삭제된 변경 내용), w:pPr, 책갈피 등은 무시
 
     def _run(self, r, para_rpr, link, out, floats, state) -> None:

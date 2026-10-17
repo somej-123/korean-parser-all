@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from .common import child, q, wattr
 from .styles import parse_ppr
+from .symbols import map_symbol
 
 _GANADA = "가나다라마바사아자차카타파하"
 _CHOSUNG = "ㄱㄴㄷㄹㅁㅂㅅㅇㅈㅊㅋㅌㅍㅎ"
@@ -82,6 +83,7 @@ class Level:
     text: str
     start: int
     ppr: dict
+    font: str = ""  # 표지 글꼴 (기호 글꼴이면 글꼴별 표로 바꾼다)
 
 
 class Numbering:
@@ -103,6 +105,8 @@ class Numbering:
                     text=wattr(child(lvl, "w:lvlText"), "val", "") or "",
                     start=int(wattr(start, "val", "1")) if start is not None else 1,
                     ppr=parse_ppr(child(lvl, "w:pPr")),
+                    font=wattr(child(child(lvl, "w:rPr"), "w:rFonts"), "ascii", "") if child(lvl, "w:rPr") is not None
+                    else "",
                 )
             self.abstract[wattr(an, "abstractNumId")] = levels
         for num in root.findall(q("w:num")):
@@ -139,7 +143,9 @@ class Numbering:
             del counters[deeper]  # 상위 번호가 바뀌면 하위 번호는 처음부터
 
         if lvl.fmt == "bullet":
-            text = "".join(_SYMBOL_BULLETS.get(ch, ch) for ch in lvl.text) or "•"
+            # 기호 글꼴(Wingdings 1·2·3, Symbol, MT Extra)의 글꼴 고유 코드는 글꼴별 표로, 그 밖에는 자주 쓰는 것만
+            text = "".join(map_symbol(lvl.font, ch) if lvl.font and "\uf000" <= ch <= "\uf0ff"
+                           else _SYMBOL_BULLETS.get(ch, ch) for ch in lvl.text) or "•"
             return text, False, lvl.ppr
 
         text = lvl.text

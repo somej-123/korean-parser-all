@@ -147,3 +147,29 @@ def test_chartex_data():
     assert (chart.chart_type, chart.title) == ("sunburst", "예산 구성")
     assert chart.categories == ["줄기 / 잎1", "줄기 / 잎2"]
     assert [(s.name, s.values) for s in chart.series] == [("금액", [22.0, 12.5])]
+
+
+def test_omml_equation_to_latex():
+    # Word 수식(OMML)은 예전에 통째로 빠졌다. 구조 요소를 LaTeX 문자열로 옮겨 Equation에 둔다
+    from lxml import etree
+
+    from korean_parser.parsers.docx.omml import omml_to_latex
+
+    m = 'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"'
+
+    def r(t):
+        return f"<m:r><m:t>{t}</m:t></m:r>"
+
+    xml = (f"<m:oMath {m}>{r('x')}{r('=')}<m:f><m:num>{r('-b')}<m:rad><m:radPr><m:degHide m:val='1'/></m:radPr>"
+           f"<m:deg/><m:e>{r('D')}</m:e></m:rad></m:num><m:den>{r('2a')}</m:den></m:f>"
+           f"<m:nary><m:naryPr><m:chr m:val='∑'/></m:naryPr><m:sub>{r('i=1')}</m:sub><m:sup>{r('n')}</m:sup>"
+           f"<m:e><m:sSub><m:e>{r('x')}</m:e><m:sub>{r('i')}</m:sub></m:sSub></m:e></m:nary></m:oMath>")
+    assert omml_to_latex(etree.fromstring(xml)) == r"x=\frac{-b\sqrt{D}}{2a}\sum_{i=1}^{n}{{x}_{i}}"
+
+
+def test_symbol_font_bullets():
+    # LibreOffice가 DOCX로 내보낸 □ ○ 글머리표는 MT Extra 0x57, Wingdings 2 0x81이다 (LibreOffice fontcvt 표)
+    from korean_parser.parsers.docx.symbols import map_symbol
+
+    assert map_symbol("MT Extra", "\uf057") == "□" and map_symbol("Wingdings 2", "\uf081") == "○"
+    assert map_symbol("Wingdings", "\uf06f") == "□" and map_symbol("Wingdings 3", "\uf075") == "▶"
