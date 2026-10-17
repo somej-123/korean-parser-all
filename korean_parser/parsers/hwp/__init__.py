@@ -916,6 +916,7 @@ class HwpParser(HwpxParser):
         self.file = file or HwpFile(self.path)
         self.doc = Document(meta=Meta(source_name=self.path.name, source_format="hwp"))
         self._seq = 0
+        self._hf_seen: dict[str, set[str]] = {}  # 머리말·꼬리말 → 이미 담은 글
         self._manifest = {}
         self._image_by_ref = {}
         self._table_depth = 0

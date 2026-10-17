@@ -156,3 +156,23 @@ def test_caption_memo_and_master_page(tmp_path):
     i = next(k for k, b in enumerate(doc.blocks) if isinstance(b, Table))
     assert doc.blocks[i + 1].text == "표 1. 시험 표"
     assert "메모(한글 메모)의 글은 넣지 않음" in doc.warnings and "바탕쪽의 글은 넣지 않음" in doc.warnings
+
+
+def test_even_page_header_is_kept(tmp_path):
+    # 짝수 쪽 머리말(applyPageType="EVEN")을 버려서 글이 경고 없이 빠졌다 (한글로 만든 표본에서 찾음).
+    # 화면용은 첫 양쪽 머리말이고, 글이 다른 머리말은 뒤에 함께 담는다
+    import re
+    import zipfile
+
+    out = tmp_path / "even.hwpx"
+    hdr = ('<hp:ctrl><hp:header id="1" applyPageType="{t}"><hp:subList><hp:p><hp:run><hp:t>{x}</hp:t></hp:run></hp:p>'
+           "</hp:subList></hp:header></hp:ctrl>")
+    with zipfile.ZipFile(FIX / "simple_table.hwpx") as zin, zipfile.ZipFile(out, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "Contents/section0.xml":
+                both, even = hdr.format(t="BOTH", x="양쪽 머리말"), hdr.format(t="EVEN", x="짝수 쪽 머리말")
+                data = re.sub("<hp:t>", even + both + "<hp:t>", data.decode("utf-8"), count=1).encode("utf-8")
+            zout.writestr(item, data)
+    doc = parse(out)
+    assert [b.text for b in doc.header] == ["짝수 쪽 머리말", "양쪽 머리말"] or         [b.text for b in doc.header] == ["양쪽 머리말", "짝수 쪽 머리말"]

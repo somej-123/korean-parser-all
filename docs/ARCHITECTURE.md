@@ -124,6 +124,8 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
 - 그리기 개체는 원래 크기(`orgSz`) 좌표에 `renderingInfo` 행렬(이동 · 확대·회전 쌍 …)을 곱해 위치를 얻는다.
   묶음 개체 안의 행렬은 이미 묶음 좌표계 기준이다.
 - 연결선의 `subjectIdx`(0 위, 1 오른쪽, 2 아래, 3 왼쪽)로 꺾인 연결선의 경로를 정한다.
+- 머리말·꼬리말은 첫 양쪽·홀수 쪽 것이 화면용이고, 짝수 쪽이나 다른 구역의 것도 글이 다르면 뒤에 함께 담는다
+  (예전에는 버려서 짝수 쪽 머리말 글이 경고 없이 빠졌다).
 - 개체 캡션(`hp:caption/hp:subList`)은 개체 안이 아니라 따로 있다. 개체 바로 뒤(side=TOP이면 바로 앞) 문단으로 둔다.
 - 메모(`hp:fieldBegin type="MEMO"`의 subList)와 바탕쪽(`Contents/masterpageN.xml`)의 글은 읽지 않고 경고를 남긴다
   (v1.0 기준: docs/GOAL.md). Word 메모(word/comments.xml)도 같다.
@@ -286,6 +288,8 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
   분수('# ?/?', 고정 분모 '?/8'은 약분하지 않음), 지수('0.00E+00'), 끝의 ','(천으로 나눔)도 따른다. 기본 회계 형식(41~44)은
   통화 기호가 지역 설정을 따라 파일에 없으므로 기호 없이 쓴다 (0은 '-').
 
+- Word 수식(OMML, m:oMath·m:oMathPara)은 LaTeX 문자열로 옮겨 Equation에 둔다 (`docx/omml.py`: 분수, 근호, 큰 연산자,
+  첨자, 괄호, 행렬, 악센트 …). 글머리표 글꼴이 기호 글꼴(Wingdings 1·2·3, Symbol, MT Extra)이면 글꼴별 표로 바꾼다.
 - Office 2016 신형 차트(cx:chartSpace)는 `read_chart`가 뿌리 요소를 보고 `read_chartex`로 넘긴다 (DOCX·PPTX·XLSX 공통).
   데이터 묶음(cx:data id)마다 분류(strDim type=cat, 여러 단계는 위 단계부터 ' / ')와 값(numDim val·size)을 읽고, 계열
   (cx:series)의 이름·데이터 번호·종류(layoutId: boxWhisker, sunburst, waterfall …)를 잇는다. 참조는 c:chart가 아니라

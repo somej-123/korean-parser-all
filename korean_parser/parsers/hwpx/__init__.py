@@ -20,7 +20,7 @@ from lxml import etree
 
 from ...ir import (
     Anchor, Block, Break, Cell, Document, Drawing, Equation, Heading, ImageRef, Image, ListInfo, Meta,
-    Note, NoteRef, PageBreak, PageSetup, Paragraph, Provenance, Row, Tab, Table, Text, TextStyle,
+    Note, NoteRef, PageBreak, PageSetup, Paragraph, Provenance, Row, Tab, Table, Text, TextStyle, walk_blocks,
 )
 from .header import Counters, Header, color, hwp_pt, kid, kids, ln, shape_comment
 from ..docx.symbols import map_symbol
@@ -74,6 +74,7 @@ class HwpxParser:
         self.names = set(self.zip.namelist())
         self.doc = Document(meta=Meta(source_name=self.path.name, source_format="hwpx"))
         self._seq = 0
+        self._hf_seen: dict[str, set[str]] = {}  # 머리말·꼬리말 → 이미 담은 글
         self._manifest: dict[str, tuple[str, str]] = {}  # id → (경로, media-type)
         self._image_by_ref: dict[str, str] = {}
         self._table_depth = 0
@@ -349,11 +350,21 @@ class HwpxParser:
             elif name == "fieldEnd":
                 state["link"] = None
             elif name in ("header", "footer"):
+                # 첫 양쪽·홀수 쪽 머리말(꼬리말)이 화면용이다. 짝수 쪽이나 다른 구역의 머리말도 글이 다르면 뒤에 함께 담는다
+                # (예전에는 버려서 짝수 쪽 머리말 글이 경고 없이 빠졌다: benchmarks/goal/samples의 한글 표본)
                 kind = name
+                sub = kid(c, "subList")
+                if sub is None:
+                    continue
+                blocks = self._paragraphs(sub)
+                text = " ".join(b.text for b in walk_blocks(blocks) if isinstance(b, Paragraph)).strip()
+                seen = self._hf_seen.setdefault(kind, set())
                 if not getattr(self.doc, kind) and c.get("applyPageType", "BOTH") in ("BOTH", "ODD"):
-                    sub = kid(c, "subList")
-                    if sub is not None:
-                        setattr(self.doc, kind, self._paragraphs(sub))
+                    setattr(self.doc, kind, blocks)
+                    seen.add(text)
+                elif text and text not in seen:
+                    getattr(self.doc, kind).extend(blocks)
+                    seen.add(text)
             elif name in ("footNote", "endNote"):
                 kind = "footnote" if name == "footNote" else "endnote"
                 label = str(sum(1 for n in self.doc.notes.values() if n.kind == kind) + 1)

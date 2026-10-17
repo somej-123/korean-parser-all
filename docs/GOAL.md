@@ -44,6 +44,7 @@
 | 공개 시험 문서 | `benchmarks/corpus/samples_web/hwpxlib`, `…/hwplib`, `…/poi` (`fetch_samples.sh`) | hwpxlib HWPX 49개, hwplib HWP 44개, Apache POI chartex.docx 1개 (모두 Apache-2.0) |
 | 저장소 시험 파일 | `tests/fixtures`, `benchmarks/docling-cpu/samples` | DOCX·HWPX·PDF·PPTX·XLSX, 스캔 1개 |
 | 실제 문서 | `samples_rfp/` (저장소에 넣지 않음) | 2026-10-17: HWP 5, PDF 3, PPTX 4, XLSX 2 |
+| 표본 문서 | `benchmarks/goal/samples` (`make_docx.py`, `make_hwp.py`) | DOCX 3, HWPX 2, HWP 2. 들어 있어야 할 요소 목록(.json) 포함 |
 
 남은 일 7번에서 실제 DOCX·HWPX를 더한다. 묶음을 바꾸면 이 표를 고친다.
 
@@ -72,6 +73,9 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
   위 첨자 각주 번호가 문단 맨 앞으로 가던 글 순서 오류도 고쳤다. 기준 1·2 모두 통과 (127개, 11개 지표).
 - 6번 뒤 (v0.17.0): Apache POI의 chartex.docx 하나를 받아(사용자 허락) 신형 차트의 데이터를 읽는다 (상자 수염, 선버스트).
   DOCX·PPTX·XLSX가 같은 해석을 쓴다. 신형 차트가 든 PPTX·XLSX 실제 표본은 없다.
+- 7번 뒤 (v0.18.0): 표본 문서 7개와 요소 목록으로 기준 3을 잰다. 표본에서 찾아 고친 것: Word 수식(OMML)이 빠짐,
+  LibreOffice가 쓴 □ ○ 글머리표(MT Extra·Wingdings 2)가 깨짐, 한글의 짝수 쪽 머리말이 경고 없이 빠짐.
+  **기준 1(135개 파일)·2(11개 지표)·3(요소 113개) 모두 통과.** 기준 4는 시험(241개)으로 지킨다.
 
 ## 남은 일 (이 순서로)
 
@@ -83,7 +87,7 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
 | 4 (완료) | HWP 차트 읽기 | 기준 3의 차트 데이터 (HWP) |
 | 5 (완료) | PDF 하이퍼링크·각주 연결 읽기 | 기준 3의 하이퍼링크·각주 (PDF) |
 | 6 (완료) | Office 2016 신형 차트(chartex) 읽기 | 시험할 파일이 있으면 읽는다. 없으면 경고만 확인하고 'v1.0 이후'로 |
-| 7 | 실제 DOCX·HWPX 문서로 확인 | 형식마다 3개 이상(사용자 제공)으로 기준 1·3 통과 |
+| 7 (완료) | 실제 DOCX·HWPX 문서로 확인 | 사용자와 정한 대로 표본을 직접 만들었다: DOCX 3개(LibreOffice·python-docx), HWPX·HWP 각 2개(한글). 요소 목록과 함께 `benchmarks/goal/samples` |
 
 ## v1.0 목표에 넣지 않는 것
 
