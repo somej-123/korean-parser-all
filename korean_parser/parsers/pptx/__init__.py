@@ -51,7 +51,7 @@ from ...ir import (
     Image, ListInfo, Meta, PageBreak, PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Shape, Table, Text,
     TextStyle, walk_blocks,
 )
-from ..docx.drawing import Theme, custom_path, read_chart, read_color, read_fill_line
+from ..docx.drawing import Theme, chart_ref, custom_path, read_chart, read_color, read_fill_line
 from ..ooxml import R_EMBED, R_ID, Package, ln
 
 PARSER_NAME = "pptx-native"
@@ -696,8 +696,8 @@ class PptxParser:
         if uri.endswith("/table"):
             tbl = data.find(q("a:tbl"))
             return [self._table(tbl, n, box)] if tbl is not None else []
-        if uri.endswith("/chart"):
-            ref = data.find(q("c:chart"))
+        if uri.endswith(("/chart", "/chartex")):
+            ref = chart_ref(data)  # c:chart, 신형 차트는 cx:chart
             part = self.pkg.rels(self._part).get(ref.get(R_ID) if ref is not None else "", (None,))[0]
             root = self.pkg.xml(part) if part else None
             w, h = (box[2] - box[0], box[3] - box[1]) if box else (400.0, 300.0)

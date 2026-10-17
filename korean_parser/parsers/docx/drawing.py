@@ -282,8 +282,19 @@ def custom_path(cust, x, y, w, h) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+CX = "{http://schemas.microsoft.com/office/drawing/2014/chartex}"
+
+
+def chart_ref(graphic_data):
+    """graphicData 안의 차트 참조 요소 (c:chart 또는 신형 cx:chart). 없으면 None."""
+    return next((el for el in graphic_data.iter() if isinstance(el.tag, str) and el.tag.split("}")[-1] == "chart"
+                 and any(k.endswith("}id") for k in el.attrib)), None)
+
+
 def read_chart(root, width_pt, height_pt, theme: Theme | None = None) -> Chart | None:
-    """chartN.xml에서 차트 종류, 제목, 범주, 계열 값과 색을 읽는다."""
+    """chartN.xml에서 차트 종류, 제목, 범주, 계열 값과 색을 읽는다. 신형 차트(cx:chartSpace)는 read_chartex."""
+    if root is not None and root.tag == f"{CX}chartSpace":
+        return read_chartex(root, width_pt, height_pt)
     theme = theme or Theme()
     plot = root.find(f".//{q('c:plotArea')}")
     if plot is None:
@@ -344,6 +355,58 @@ def read_chart(root, width_pt, height_pt, theme: Theme | None = None) -> Chart |
     return Chart(chart_type=chart_type, title=title, categories=categories, series=series,
                  bar_dir=bar_dir.get("val") if bar_dir is not None else None,
                  grouping=grouping.get("val") if grouping is not None else None,
+                 width_pt=width_pt, height_pt=height_pt)
+
+
+def read_chartex(root, width_pt, height_pt) -> Chart | None:
+    """Office 2016 신형 차트(cx:chartSpace: 폭포, 상자 수염, 선버스트, 트리맵, 깔때기, 히스토그램 …)의 데이터.
+
+    cx:chartData의 데이터 묶음(cx:data id)마다 분류 글(cx:strDim type=cat, 여러 단계면 ' / '로 이음)과 값(cx:numDim)이
+    있고, cx:series가 이름(cx:tx)·데이터 번호(cx:dataId)·종류(layoutId)를 가리킨다. 종류는 layoutId 그대로 둔다
+    (화면에는 데이터 표로 보인다). 색과 통계 설정(사분위 계산 방법 등)은 읽지 않는다. Apache POI chartex.docx로 확인.
+    """
+    data: dict[str, tuple[list[str], list[float | None]]] = {}
+    for d in root.iter(f"{CX}data"):
+        cats: list[str] = []
+        str_dim = next((s for s in d.findall(f"{CX}strDim") if s.get("type") == "cat"), None)
+        if str_dim is not None:
+            levels = [{int(p.get("idx", "0")): (p.text or "") for p in lvl.findall(f"{CX}pt")}
+                      for lvl in str_dim.findall(f"{CX}lvl")]
+            n = max((max(lv) + 1 for lv in levels if lv), default=0)
+            # 여러 단계(선버스트·트리맵의 상위 분류)는 위 단계부터 이어 쓴다. 파일에는 아래 단계가 먼저 나온다
+            cats = [" / ".join(lv[i] for lv in reversed(levels) if lv.get(i)) for i in range(n)]
+        num_dim = next((s for s in d.findall(f"{CX}numDim") if s.get("type") in ("val", "size", "y")), None)
+        vals: list[float | None] = []
+        if num_dim is not None:
+            lvl = num_dim.find(f"{CX}lvl")
+            pts = {int(p.get("idx", "0")): p.text for p in (lvl.findall(f"{CX}pt") if lvl is not None else [])}
+            count = int(lvl.get("ptCount", "0") or 0) if lvl is not None else 0
+            for i in range(max(count, max(pts) + 1 if pts else 0)):
+                try:
+                    vals.append(float(pts[i]) if pts.get(i) not in (None, "") else None)
+                except ValueError:
+                    vals.append(None)
+        data[d.get("id", "")] = (cats, vals)
+    series: list[ChartSeries] = []
+    categories: list[str] = []
+    kinds: list[str] = []
+    for ser in root.iter(f"{CX}series"):
+        ref = ser.find(f"{CX}dataId")
+        cats, vals = data.get(ref.get("val", "") if ref is not None else "", ([], []))
+        if not vals:
+            continue
+        name = ser.find(f"{CX}tx/{CX}txData/{CX}v")
+        series.append(ChartSeries(name=name.text if name is not None else None, values=vals))
+        categories = categories or cats
+        kinds.append(ser.get("layoutId") or "chartex")
+    if not series:
+        return None
+    t = root.find(f"{CX}chart/{CX}title")
+    title = None
+    if t is not None:
+        v = t.find(f".//{CX}v")
+        title = (v.text if v is not None else "".join(x.text or "" for x in t.iter(q("a:t")))) or None
+    return Chart(chart_type=kinds[0], title=title, categories=categories, series=series,
                  width_pt=width_pt, height_pt=height_pt)
 
 

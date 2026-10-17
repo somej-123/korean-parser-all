@@ -126,3 +126,24 @@ def test_errors_are_readable(tmp_path):
     ole.write_bytes(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1" + b"\0" * 100)
     with pytest.raises(DocumentError, match="암호화"):
         parse(ole)
+
+
+def test_chartex_data():
+    # Office 2016 신형 차트(cx:chartSpace)는 예전에 '지원하지 않는 그래픽 요소: chartex' 경고만 남겼다.
+    # 데이터 묶음(분류·값)과 계열(이름, 데이터 번호, 종류)을 읽는다. 여러 단계 분류는 위 단계부터 ' / '로 잇는다
+    from lxml import etree
+
+    from korean_parser.parsers.docx.drawing import read_chart
+
+    cx = "http://schemas.microsoft.com/office/drawing/2014/chartex"
+    xml = f"""<cx:chartSpace xmlns:cx="{cx}"><cx:chartData><cx:data id="0">
+      <cx:strDim type="cat"><cx:lvl ptCount="2"><cx:pt idx="0">잎1</cx:pt><cx:pt idx="1">잎2</cx:pt></cx:lvl>
+        <cx:lvl ptCount="2"><cx:pt idx="0">줄기</cx:pt><cx:pt idx="1">줄기</cx:pt></cx:lvl></cx:strDim>
+      <cx:numDim type="size"><cx:lvl ptCount="2"><cx:pt idx="0">22</cx:pt><cx:pt idx="1">12.5</cx:pt></cx:lvl></cx:numDim>
+    </cx:data></cx:chartData><cx:chart><cx:title><cx:tx><cx:txData><cx:v>예산 구성</cx:v></cx:txData></cx:tx></cx:title>
+    <cx:plotArea><cx:plotAreaRegion><cx:series layoutId="sunburst"><cx:tx><cx:txData><cx:v>금액</cx:v></cx:txData></cx:tx>
+    <cx:dataId val="0"/></cx:series></cx:plotAreaRegion></cx:plotArea></cx:chart></cx:chartSpace>"""
+    chart = read_chart(etree.fromstring(xml), 300, 200)
+    assert (chart.chart_type, chart.title) == ("sunburst", "예산 구성")
+    assert chart.categories == ["줄기 / 잎1", "줄기 / 잎2"]
+    assert [(s.name, s.values) for s in chart.series] == [("금액", [22.0, 12.5])]

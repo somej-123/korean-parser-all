@@ -39,6 +39,7 @@ SETS = [
     ("실제 문서", ROOT / "samples_rfp"),
     ("공개 시험 문서", ROOT / "benchmarks" / "corpus" / "samples_web" / "hwpxlib"),
     ("공개 시험 문서", ROOT / "benchmarks" / "corpus" / "samples_web" / "hwplib"),
+    ("공개 시험 문서", ROOT / "benchmarks" / "corpus" / "samples_web" / "poi"),
     ("저장소 시험 파일", ROOT / "tests" / "fixtures"),
     ("저장소 시험 파일", ROOT / "benchmarks" / "docling-cpu" / "samples"),
 ]

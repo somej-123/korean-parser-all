@@ -41,7 +41,7 @@
 | 묶음 | 위치 | 내용 |
 |---|---|---|
 | 합성 정답 세트 | `benchmarks/eval/data` (`synth.py`로 만듦) | 제안요청서 12개 (DOCX, PDF), 스캔 4개 |
-| 공개 시험 문서 | `benchmarks/corpus/samples_web/hwpxlib`, `…/hwplib` (`fetch_samples.sh`) | hwpxlib HWPX 49개, hwplib HWP 44개 (Apache-2.0) |
+| 공개 시험 문서 | `benchmarks/corpus/samples_web/hwpxlib`, `…/hwplib`, `…/poi` (`fetch_samples.sh`) | hwpxlib HWPX 49개, hwplib HWP 44개, Apache POI chartex.docx 1개 (모두 Apache-2.0) |
 | 저장소 시험 파일 | `tests/fixtures`, `benchmarks/docling-cpu/samples` | DOCX·HWPX·PDF·PPTX·XLSX, 스캔 1개 |
 | 실제 문서 | `samples_rfp/` (저장소에 넣지 않음) | 2026-10-17: HWP 5, PDF 3, PPTX 4, XLSX 2 |
 
@@ -70,6 +70,8 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
   넣으면서 HWP 개체 캡션이 빠지던 것을 고치고, 바탕쪽·숨은 설명·문단 아래 달린 글 목록은 경고를 남긴다. 기준 1 통과 (126개).
 - 5번 뒤 (v0.16.0): PDF 링크(실제 PDF 3개의 링크 모두)와 각주(시험 문서 `tests/fixtures/footnotes.pdf`)를 읽는다.
   위 첨자 각주 번호가 문단 맨 앞으로 가던 글 순서 오류도 고쳤다. 기준 1·2 모두 통과 (127개, 11개 지표).
+- 6번 뒤 (v0.17.0): Apache POI의 chartex.docx 하나를 받아(사용자 허락) 신형 차트의 데이터를 읽는다 (상자 수염, 선버스트).
+  DOCX·PPTX·XLSX가 같은 해석을 쓴다. 신형 차트가 든 PPTX·XLSX 실제 표본은 없다.
 
 ## 남은 일 (이 순서로)
 
@@ -80,7 +82,7 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
 | 3 (완료) | 스캔 표 평가를 보이는 부분 기준으로 바로잡고 TEDS 0.85 넘기기 | 기준 2 스캔 통과 |
 | 4 (완료) | HWP 차트 읽기 | 기준 3의 차트 데이터 (HWP) |
 | 5 (완료) | PDF 하이퍼링크·각주 연결 읽기 | 기준 3의 하이퍼링크·각주 (PDF) |
-| 6 | Office 2016 신형 차트(chartex) 읽기 | 시험할 파일이 있으면 읽는다. 없으면 경고만 확인하고 'v1.0 이후'로 |
+| 6 (완료) | Office 2016 신형 차트(chartex) 읽기 | 시험할 파일이 있으면 읽는다. 없으면 경고만 확인하고 'v1.0 이후'로 |
 | 7 | 실제 DOCX·HWPX 문서로 확인 | 형식마다 3개 이상(사용자 제공)으로 기준 1·3 통과 |
 
 ## v1.0 목표에 넣지 않는 것

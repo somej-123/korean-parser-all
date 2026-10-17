@@ -286,6 +286,11 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
   분수('# ?/?', 고정 분모 '?/8'은 약분하지 않음), 지수('0.00E+00'), 끝의 ','(천으로 나눔)도 따른다. 기본 회계 형식(41~44)은
   통화 기호가 지역 설정을 따라 파일에 없으므로 기호 없이 쓴다 (0은 '-').
 
+- Office 2016 신형 차트(cx:chartSpace)는 `read_chart`가 뿌리 요소를 보고 `read_chartex`로 넘긴다 (DOCX·PPTX·XLSX 공통).
+  데이터 묶음(cx:data id)마다 분류(strDim type=cat, 여러 단계는 위 단계부터 ' / ')와 값(numDim val·size)을 읽고, 계열
+  (cx:series)의 이름·데이터 번호·종류(layoutId: boxWhisker, sunburst, waterfall …)를 잇는다. 참조는 c:chart가 아니라
+  cx:chart이고 graphicData uri가 …/chartex다 (`chart_ref`). Apache POI chartex.docx로 확인.
+
 ## 그림 형식 바꾸기 (`images.py`)
 
 - 한글·워드 문서의 로고·도식은 WMF·EMF(윈도 메타파일)인 경우가 많은데 브라우저가 그리지 못한다. `parse()`가 파싱 뒤에

@@ -16,7 +16,7 @@ from ...ir import (
     NoteRef, PageBreak, PageSetup, Paragraph, Provenance, Row, Shape, Tab, Table, Text,
 )
 from .common import NS, child, emu_to_pt, hex_color, on_off, q, twips_to_pt, wattr
-from .drawing import ShapeReader, Theme, read_chart, read_dsp_drawing
+from .drawing import chart_ref, ShapeReader, Theme, read_chart, read_dsp_drawing
 from .numbering import Numbering
 from .symbols import map_symbol
 from .styles import (
@@ -461,8 +461,8 @@ class DocxParser:
             if shapes:
                 item = Drawing(id=self._new_id(), prov=self._prov(), width_pt=w or 0, height_pt=h or 0,
                                shapes=shapes, alt=alt)
-        elif uri.endswith("/chart"):
-            ref = data.find(q("c:chart"))
+        elif uri.endswith(("/chart", "/chartex")):
+            ref = chart_ref(data)  # c:chart, 신형 차트는 cx:chart
             rel = self._rels.get(ref.get(f"{{{NS['r']}}}id")) if ref is not None else None
             root = self._xml(rel[1]) if rel else None
             if root is not None:

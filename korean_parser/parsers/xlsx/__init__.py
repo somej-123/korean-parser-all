@@ -31,7 +31,7 @@ from pathlib import Path
 from lxml import etree
 
 from ...ir import Block, Cell, Document, Figure, Heading, Image, Meta, Paragraph, Provenance, Row, Table, Text, TextStyle
-from ..docx.drawing import read_chart
+from ..docx.drawing import chart_ref, read_chart
 from ..ooxml import R_EMBED, R_ID, Package, ln
 
 PARSER_NAME = "xlsx-native"
@@ -417,7 +417,7 @@ class XlsxParser:
             w = int(ext.get("cx", "0")) / 12700 if ext is not None else 400.0
             h = int(ext.get("cy", "0")) / 12700 if ext is not None else 300.0
             for frame in anchor.iter(f"{XDR}graphicFrame"):
-                ref = frame.find(f".//{C}chart")
+                ref = chart_ref(frame)  # c:chart, 신형 차트는 cx:chart
                 chart_part = rels.get(ref.get(R_ID) if ref is not None else "", (None,))[0]
                 chart_root = self.pkg.xml(chart_part) if chart_part else None
                 if chart_root is None:
