@@ -118,3 +118,14 @@ def test_heavy_fonts_by_ink_density():
     light = {"KoPubDotumLight": [0.28] * 20, "KoPubDotumMedium": [0.39] * 20}
     assert heavy_by_density(light, Counter(KoPubDotumLight=900, KoPubDotumMedium=300)) == set()
     assert heavy_by_density({"A": [0.5] * 20}, Counter(A=5)) == set()  # 글꼴 하나뿐이면 비교할 본문이 없다
+
+
+def test_superscript_joins_its_line():
+    # 기준선이 높은 작은 글자(각주 번호)는 따로 한 줄이 되지 않고 제 줄의 그 자리에 들어간다
+    from korean_parser.parsers.pdf.page import PageInfo
+
+    body = [ch(c, x, size=10.0, advance=10.0, y=100.0) for c, x in zip("기관이다", (10, 20, 34, 44))]
+    sup = ch("1", 30, size=6.0, advance=3.0, y=96.0)  # '관'과 '이' 사이, 기준선 4pt 위
+    page = PageInfo(number=1, width=600, height=800, chars=body[:2] + [sup] + body[2:])
+    assert page.text_lines((0, 80, 200, 110)) == ["기관1이다"]
+    assert [(t, b, a) for _, t, b, a in page.superscripts()] == [("1", "기관", "이다")]

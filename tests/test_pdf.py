@@ -167,6 +167,25 @@ def test_real_scan_structure():
     assert (first[0].row_span, first[1].col_span, len(table.rows)) == (2, 3, 4)
 
 
+def test_links_and_footnotes():
+    # PDF 링크 주석(바깥 주소)은 그 영역의 글에만 붙는다. 각주는 쪽 아래에서 문서 각주로 옮기고 본문 위 첨자 자리에
+    # NoteRef를 둔다. 위 첨자 번호는 기준선이 높아 따로 한 줄이 되어 문단 맨 앞으로 갔었다 ('1 이 사업의 … 공공기관 이다')
+    from korean_parser.ir import NoteRef, Text
+
+    report = parse(PDF)
+    links = [(i.text, i.link) for b in report.iter_blocks() for i in getattr(b, "inlines", []) if isinstance(i, Text) and i.link]
+    assert links == [("Docling 저장소", "https://github.com/docling-project/docling")]
+
+    doc = parse(Path(__file__).parent / "fixtures" / "footnotes.pdf")
+    assert [(n.label, n.blocks[0].text) for n in doc.notes.values()] == [
+        ("1", "「전자정부법」 제2조에 따른 행정기관을 말한다."), ("2", "2026년 1월 기준 금액이며 부가가치세를 포함한다."),
+        ("3", "세부 기준은 별첨 2의 평가표를 따른다.")]
+    first = next(b for b in doc.blocks if isinstance(b, Paragraph))
+    assert first.text.startswith("이 사업의 발주 기관은 공공기관이다.")
+    refs = [i.label for b in doc.blocks for i in getattr(b, "inlines", []) if isinstance(i, NoteRef)]
+    assert refs == ["1", "2", "3"] and not any(b.text.startswith(("1 ", "2 ", "3 ")) for b in of(doc, Paragraph))
+
+
 def test_table_of_contents_lines_stay_paragraphs():
     # 목차(Docling document_index)는 표 구조 모델에 맡기지 않는다. 맡기면 번호와 제목이 다른 칸으로 갈라졌다
     toc = parse(Path(__file__).parent / "fixtures" / "toc.pdf")

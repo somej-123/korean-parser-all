@@ -19,8 +19,8 @@ import statistics
 from pathlib import Path
 
 from ...ir import (
-    Block, Border, Borders, Cell, Document, Figure, FixedPage, Heading, Image, Meta, PageBreak,
-    PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Table, Text, TextRun, TextStyle,
+    Block, Border, Borders, Cell, Document, Figure, FixedPage, Heading, Image, Meta, Note, NoteRef, PageBreak,
+    PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Table, Text, TextRun, TextStyle, walk_blocks,
 )
 from ...normalize import is_hangul_syllable, normalize_text
 from ...outline import match_marker
@@ -658,6 +658,8 @@ class PdfParser:
         self._merge_split_tables()
         self._merge_split_paragraphs()
         self._attach_captions()
+        self._apply_links()
+        self._link_footnotes()
         self._vertical_spacing()
 
     def _looks_like_title(self, page: PageInfo, box: BBox) -> bool:
@@ -668,6 +670,87 @@ class PdfParser:
         _, size = self._text_style(page, box)
         others = [s for _, s in getattr(self, "_heading_sizes", []) if s]
         return bool(size and others and size >= max(others) * 1.3)
+
+    def _apply_links(self) -> None:
+        """PDF 링크 주석(바깥 주소)을 그 영역에 놓인 글에 붙인다 (Text.link).
+
+        링크 영역의 텍스트 레이어 글을 읽어, 영역과 겹치는 문단에서 같은 글(글자·숫자만 비교)을 찾아 그 부분만 링크로 나눈다.
+        """
+        if self.ocr:
+            return
+        targets = [b for blocks in (self.doc.header, self.doc.blocks, self.doc.footer)
+                   for b in walk_blocks(blocks) if isinstance(b, (Paragraph, Heading)) and b.prov and b.prov.bbox]
+        for n in range(1, len(self.pages) + 1):
+            page = self.pages.page(n)
+            for rect, uri in self.pages.links(n):
+                # 글자·숫자만으로 맞춘다: 마침표 같은 작은 글자는 상자가 링크 영역 밖으로 벗어나기도 한다 ('ricx@kumoh ac kr')
+                label = "".join(ch for ch in "".join(page.text_lines(rect, pad=0.5)) if ch.isalnum())
+                if not label:
+                    continue
+                for b in targets:
+                    if b.prov.page == n and intersect(b.prov.bbox, expand(rect, 1)) and _link_span(b, label, uri):
+                        break
+
+    def _link_footnotes(self) -> None:
+        """쪽 아래 각주를 문서 각주(notes)로 옮기고, 본문의 위 첨자 번호 자리에 각주 참조(NoteRef)를 넣는다.
+
+        각주로 보는 문단: 쪽 아래쪽(높이의 55% 아래)에 있고, '번호 + 공백'으로 시작하며, 그 번호가 같은 쪽 본문에
+        위 첨자로 있고, 본문보다 큰 글씨가 아니다 (각주 글씨가 본문과 같은 문서도 있다: LibreOffice 기본값).
+        Docling은 각주를 각주(footnote)로도 일반 글로도 분류해서 레이블을 쓰지 않는다.
+        """
+        if self.ocr:
+            return
+        sizes = [s.size_pt for b in self.doc.blocks if isinstance(b, Paragraph) and (s := _first_style(b)) and s.size_pt
+                 for _ in range(min(len(b.text), 200))]
+        body = statistics.median(sizes) if sizes else None
+        for n in range(1, len(self.pages) + 1):
+            page = self.pages.page(n)
+            marks = [m for m in page.superscripts() if re.fullmatch(r"\d{1,3}|[*†‡]", m[1])]
+            if not marks:
+                continue
+            for b in [b for b in self.doc.blocks if isinstance(b, Paragraph) and b.prov and b.prov.page == n
+                      and b.prov.bbox and b.prov.bbox[1] > page.height * 0.55]:
+                m = re.match(r"^(\d{1,3}|[*†‡])\s+\S", b.text)
+                st = _first_style(b)
+                if not m or (body and st and st.size_pt and st.size_pt > body + 0.1):
+                    continue
+                mark = next((x for x in marks if x[1] == m.group(1)), None)
+                if mark is None:
+                    continue
+                key = f"fn{len(self.doc.notes) + 1}"
+                label = m.group(1)
+                note = b.model_copy(deep=True)
+                first = note.inlines[0]
+                if isinstance(first, Text):
+                    note.inlines[0] = first.model_copy(update={"text": first.text.lstrip()[len(label):].lstrip()})
+                self.doc.notes[key] = Note(kind="footnote", label=label, blocks=[note])
+                self.doc.blocks.remove(b)
+                marks.remove(mark)
+                self._place_note_ref(n, mark, key, label)
+
+    def _place_note_ref(self, n: int, mark, key: str, label: str) -> None:
+        """위 첨자 번호가 있는 본문 문단에서 그 번호(앞뒤 글자로 자리를 찾는다)를 NoteRef로 바꾼다."""
+        box, text, before, after = mark
+        for b in walk_blocks(self.doc.blocks):
+            if not isinstance(b, (Paragraph, Heading)) or not b.prov or b.prov.page != n or not b.prov.bbox \
+                    or not intersect(b.prov.bbox, expand(box, 1)):
+                continue
+            for k, inl in enumerate(b.inlines):
+                if not isinstance(inl, Text):
+                    continue
+                pos = [i for i, ch in enumerate(inl.text) if not ch.isspace()]
+                flat = "".join(inl.text[i] for i in pos)
+                for ctx, shift in ((before + text + after, len(before)), (before + text, len(before)),
+                                   (text + after, 0)):
+                    at = flat.find(ctx) if ctx != text else -1
+                    if at < 0:
+                        continue
+                    s = pos[at + shift]
+                    e = pos[at + shift + len(text) - 1] + 1
+                    parts = [inl.model_copy(update={"text": inl.text[:s].rstrip()}), NoteRef(note_id=key, label=label),
+                             inl.model_copy(update={"text": inl.text[e:]})]
+                    b.inlines[k:k + 1] = [p for p in parts if not isinstance(p, Text) or p.text]
+                    return
 
     def _vertical_spacing(self) -> None:
         """같은 쪽에서 앞 블록과의 세로 간격을 '앞 간격'으로 옮겨 원본의 여백 느낌을 살린다."""
@@ -1362,6 +1445,25 @@ class PdfParser:
             out.append((tb[1], blk))
         out.sort(key=lambda x: x[0])
         return [b for _, b in out], used
+
+
+def _link_span(b, label: str, uri: str) -> bool:
+    """문단 b의 글에서 label(글자·숫자만)과 같은 부분을 찾아 그 부분만 링크 달린 Text로 나눈다. 찾으면 True."""
+    for k, inl in enumerate(b.inlines):
+        if not isinstance(inl, Text) or inl.link:
+            continue
+        pos = [i for i, ch in enumerate(inl.text) if ch.isalnum()]  # 글자·숫자만 → 원래 위치
+        flat = "".join(inl.text[i] for i in pos)
+        at = flat.find(label)
+        if at < 0:
+            continue
+        s, e = pos[at], pos[at + len(label) - 1] + 1
+        parts = [inl.model_copy(update={"text": inl.text[:s]}),
+                 inl.model_copy(update={"text": inl.text[s:e], "link": uri}),
+                 inl.model_copy(update={"text": inl.text[e:]})]
+        b.inlines[k:k + 1] = [p for p in parts if p.text]
+        return True
+    return False
 
 
 def _luma(hex_color: str) -> float:

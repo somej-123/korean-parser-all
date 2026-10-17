@@ -38,4 +38,4 @@ curl -sSL -o "$DEST/openoffice/itemized.ott" https://templates.openoffice.org/te
 if command -v soffice >/dev/null; then
   soffice --headless --convert-to docx:"MS Word 2007 XML" --outdir "$DEST/openoffice" "$DEST/openoffice/itemized.ott" >/dev/null
 fi
-echo "받은 문서: DOCX $(ls "$DEST"/poi/*.docx "$DEST"/openoffice/*.docx 2>/dev/null | wc -l)개, HWPX $(ls "$DEST"/hwpxlib/*.hwpx 2>/dev/null | wc -l)개 → $DEST"
+echo "받은 문서: DOCX $(ls "$DEST"/poi/*.docx "$DEST"/openoffice/*.docx 2>/dev/null | wc -l)개, HWPX $(ls "$DEST"/hwpxlib/*.hwpx 2>/dev/null | wc -l)개, HWP $(ls "$DEST"/hwplib/*.hwp 2>/dev/null | wc -l)개 → $DEST"

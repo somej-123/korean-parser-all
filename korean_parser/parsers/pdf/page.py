@@ -174,16 +174,7 @@ class PageInfo:
         chars = [c for c in _dedupe_overlaps(self.chars_in(box, pad)) if not (c.text.isspace() and c.generated)]
         if not chars:
             return []
-        # 줄은 기준선 위치로 묶고, 줄 안에서는 왼쪽부터 읽는다. 그리는 순서(내용 순서)를 따르면 괄호·숫자를
-        # 따로 그리는 PDF에서 "( ) 소기업 확인서"처럼 글자 순서가 뒤섞인다.
-        lines_of: list[list[Char]] = []
-        for c in sorted(chars, key=lambda c: c.origin[1]):
-            if lines_of:
-                ref = lines_of[-1][0]
-                if abs(c.origin[1] - ref.origin[1]) <= max(ref.size, c.size, 1.0) * 0.4:
-                    lines_of[-1].append(c)
-                    continue
-            lines_of.append([c])
+        lines_of = _group_lines(chars)
         lines: list[str] = []
         for line in lines_of:
             line.sort(key=lambda c: c.origin[0])
@@ -208,6 +199,44 @@ class PageInfo:
                     cur += c.text
             lines.append(cur)
         return [ln.lstrip() for ln in lines if ln.strip()]
+
+    def superscripts(self) -> list[tuple[BBox, str, str, str]]:
+        """쪽의 위 첨자 묶음 (상자, 글, 앞 두 글자, 뒤 두 글자). 각주 번호를 본문과 잇는 데 쓴다.
+
+        줄 글자 크기 중앙값의 0.8배 이하이고 기준선이 글자 크기의 1/4 넘게 올라간 글자가 이어진 묶음이다.
+        """
+        out: list[tuple[BBox, str, str, str]] = []
+        chars = [c for c in _dedupe_overlaps(self.chars) if not (c.text.isspace() and c.generated)]
+        for line in _group_lines(chars):
+            line.sort(key=lambda c: c.origin[0])
+            solid = [c for c in line if c.text.strip()]
+            if len(solid) < 2:
+                continue
+            med = statistics.median(c.size for c in solid)
+            body = [c.origin[1] for c in solid if c.size >= med * 0.9]
+            if not body:
+                continue
+            base = statistics.median(body)
+
+            def raised(c) -> bool:
+                return bool(c.text.strip()) and c.size <= med * 0.8 and c.origin[1] < base - c.size * 0.25
+
+            i = 0
+            while i < len(line):
+                if not raised(line[i]):
+                    i += 1
+                    continue
+                j = i
+                while j < len(line) and raised(line[j]):
+                    j += 1
+                run = line[i:j]
+                box = (min(c.box[0] for c in run), min(c.box[1] for c in run),
+                       max(c.box[2] for c in run), max(c.box[3] for c in run))
+                before = "".join(c.text for c in line[:i] if c.text.strip())[-2:]
+                after = "".join(c.text for c in line[j:] if c.text.strip())[:2]
+                out.append((box, "".join(c.text for c in run), before, after))
+                i = j
+        return out
 
     def sample_color(self, x: float, y: float) -> str | None:
         """그 위치의 화면 색 (표 칸 배경 등). 흰색에 가까우면 None."""
@@ -236,6 +265,49 @@ class PageInfo:
         buf = io.BytesIO()
         img.save(buf, "PNG", optimize=True)
         return buf.getvalue()
+
+
+def _group_lines(chars: list) -> list[list]:
+    """글자를 줄로 묶는다. 줄은 기준선 위치로 묶고, 줄 안 순서는 부르는 쪽이 왼쪽부터 정한다.
+
+    그리는 순서(내용 순서)를 따르면 괄호·숫자를 따로 그리는 PDF에서 "( ) 소기업 확인서"처럼 글자 순서가 뒤섞인다.
+    위 첨자(각주 번호)는 기준선이 높아 따로 한 줄이 되어 문단 맨 앞으로 갔다 ('1 이 사업의 … 공공기관 이다').
+    작은 글자만 있는 줄이 이웃 줄의 높이 범위 안에 들고 가로로도 그 줄 범위 안이면 그 줄에 합친다.
+    """
+    lines_of: list[list] = []
+    for c in sorted(chars, key=lambda c: c.origin[1]):
+        if lines_of:
+            ref = lines_of[-1][0]
+            if abs(c.origin[1] - ref.origin[1]) <= max(ref.size, c.size, 1.0) * 0.4:
+                lines_of[-1].append(c)
+                continue
+        lines_of.append([c])
+
+    def size(line) -> float:
+        solid = [c.size for c in line if c.text.strip()]
+        return max(solid) if solid else 0.0
+
+    k = 0
+    while k < len(lines_of):
+        small = lines_of[k]
+        s = size(small)
+        cy = statistics.mean((c.box[1] + c.box[3]) / 2 for c in small)
+        x0, x1 = min(c.box[0] for c in small), max(c.box[2] for c in small)
+        home = None
+        for m in (k - 1, k + 1):
+            if 0 <= m < len(lines_of) and s and s <= size(lines_of[m]) * 0.8:
+                other = [c for c in lines_of[m] if c.text.strip()]
+                if other and min(c.box[1] for c in other) <= cy <= max(c.box[3] for c in other) \
+                        and min(c.box[0] for c in other) - 2 <= x0 and x1 <= max(c.box[2] for c in other) + 12:
+                    home = m
+                    break
+        if home is None:
+            k += 1
+            continue
+        lines_of[home].extend(small)
+        del lines_of[k]
+        k = max(k - 1, 0)
+    return lines_of
 
 
 def heavy_by_density(dens: dict[str, list[float]], count: Counter) -> set[str]:
@@ -267,6 +339,36 @@ class PdfPages:
         if self._bg_pdf is not None:
             self._bg_pdf.close()
         self.pdf.close()
+
+    def links(self, number: int) -> list[tuple[BBox, str]]:
+        """쪽의 바깥 링크 주석 (영역, 주소). 문서 안으로 가는 링크(목차 등)는 뺀다."""
+        import pypdfium2.raw as raw
+
+        page = self.pdf[number - 1]
+        h = page.get_height()
+        out: list[tuple[BBox, str]] = []
+        for k in range(raw.FPDFPage_GetAnnotCount(page.raw)):
+            annot = raw.FPDFPage_GetAnnot(page.raw, k)
+            try:
+                if raw.FPDFAnnot_GetSubtype(annot) != raw.FPDF_ANNOT_LINK:
+                    continue
+                link = raw.FPDFAnnot_GetLink(annot)
+                action = raw.FPDFLink_GetAction(link) if link else None
+                if not action or raw.FPDFAction_GetType(action) != raw.PDFACTION_URI:
+                    continue
+                n = raw.FPDFAction_GetURIPath(self.pdf.raw, action, None, 0)
+                buf = ctypes.create_string_buffer(n)
+                raw.FPDFAction_GetURIPath(self.pdf.raw, action, buf, n)
+                uri = buf.value.decode("utf-8", "replace").strip()
+                rect = raw.FS_RECTF()
+                if uri and raw.FPDFAnnot_GetRect(annot, rect):
+                    # 위·아래(왼쪽·오른쪽)가 뒤집혀 저장된 PDF가 있다 (실제 제안요청서, 입찰공고)
+                    ys = sorted((h - rect.top, h - rect.bottom))
+                    xs = sorted((rect.left, rect.right))
+                    out.append(((xs[0], ys[0], xs[1], ys[1]), uri))
+            finally:
+                raw.FPDFPage_CloseAnnot(annot)
+        return out
 
     def heavy_fonts(self, pages: int = 6, per_font: int = 60) -> set[str]:
         """굵기 정보 없이 굵게 그려지는 글꼴 이름들 (문서마다 한 번 계산).
