@@ -12,6 +12,7 @@ python run.py samples_web --out corpus_report.md
 | [Apache POI](https://github.com/apache/poi) `test-data/document` | DOCX | 130 | Apache-2.0 |
 | [OpenOffice 개조식 보고서 템플릿](https://templates.openoffice.org/) | DOCX (변환) | 1 | BSD |
 | [hwpxlib](https://github.com/neolord0/hwpxlib) `testFile` | HWPX | 49 | Apache-2.0 |
+| [hwplib](https://github.com/neolord0/hwplib) `sample_hwp` | HWP | 44 | Apache-2.0 |
 
 ## 나라장터 첨부파일로 시험하기
 

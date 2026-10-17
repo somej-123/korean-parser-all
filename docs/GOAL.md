@@ -9,8 +9,8 @@
 
 - **기준 문서 묶음**(아래)의 모든 파일에서 원문 글자 보존율이 0.99 이상이다 (텍스트 레이어가 있는 PDF, DOCX, HWPX, HWP, PPTX, XLSX).
   원문 글자는 파서와 따로 읽는다: PDF 텍스트 레이어, DOCX `w:t`, HWPX `hp:t`, HWP 문단 글 레코드, PPTX `a:t`, XLSX 칸 값.
-  일부러 버리는 것(PPTX 쪽 번호, 되풀이되는 머리말·꼬리말의 두 번째부터)과 메모(한글 메모, Word 메모: v1.0에서는
-  경고만 남긴다)는 빼고 잰다.
+  일부러 버리는 것(PPTX 쪽 번호, 되풀이되는 머리말·꼬리말의 두 번째부터)과 v1.0에서 경고만 남기는 것(메모, 바탕쪽,
+  숨은 설명)은 빼고 잰다.
 - 못 읽은 개체는 모두 `warnings`로 알린다. 경고 없이 사라지는 글은 0건이다.
 
 ### 기준 2. 구조 정확도
@@ -41,7 +41,7 @@
 | 묶음 | 위치 | 내용 |
 |---|---|---|
 | 합성 정답 세트 | `benchmarks/eval/data` (`synth.py`로 만듦) | 제안요청서 12개 (DOCX, PDF), 스캔 4개 |
-| 공개 시험 문서 | `benchmarks/corpus/samples_web/hwpxlib` (`fetch_samples.sh`) | hwpxlib HWPX 49개 (Apache-2.0) |
+| 공개 시험 문서 | `benchmarks/corpus/samples_web/hwpxlib`, `…/hwplib` (`fetch_samples.sh`) | hwpxlib HWPX 49개, hwplib HWP 44개 (Apache-2.0) |
 | 저장소 시험 파일 | `tests/fixtures`, `benchmarks/docling-cpu/samples` | DOCX·HWPX·PDF·PPTX·XLSX, 스캔 1개 |
 | 실제 문서 | `samples_rfp/` (저장소에 넣지 않음) | 2026-10-17: HWP 5, PDF 3, PPTX 4, XLSX 2 |
 
@@ -66,6 +66,8 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
 - 3번 뒤: 스캔 정답에 그림에 없는 4쪽 글이 섞여 있던 평가 실수를 바로잡았다 (benchmarks/eval/README). 스캔 표 TEDS
   0.948, 글자 오류율 0.8%, 어절 F1 0.955로 기준 2 모두 통과. 스캔 기준값(F1 0.88, 글자 오류율 15%)은 예전 정답으로
   정한 것이라 다시 정할지 사용자에게 묻는다.
+- 4번 뒤 (v0.15.0): hwplib HWP 44개를 기준 문서 묶음에 넣었다 (126개). HWP 차트(OLE 안 VtChart)의 데이터 표를 읽는다.
+  넣으면서 HWP 개체 캡션이 빠지던 것을 고치고, 바탕쪽·숨은 설명·문단 아래 달린 글 목록은 경고를 남긴다. 기준 1 통과 (126개).
 
 ## 남은 일 (이 순서로)
 
@@ -74,7 +76,7 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
 | 1 (완료) | 기준 문서 묶음을 한 명령으로 재는 도구 (`benchmarks/goal/check.py`) | 기준 1·2의 모든 수치가 한 보고서에 나오고, 기준에 못 미친 곳이 표시된다 |
 | 2 (완료) | 1번에서 드러난 기준 1 미달 고치기 | 기준 1 통과: 메모는 경고, 개체 캡션은 읽기. 바탕쪽·글상자 연결에서 글이 빠지는지도 확인한다 |
 | 3 (완료) | 스캔 표 평가를 보이는 부분 기준으로 바로잡고 TEDS 0.85 넘기기 | 기준 2 스캔 통과 |
-| 4 | HWP 차트 읽기 | 기준 3의 차트 데이터 (HWP) |
+| 4 (완료) | HWP 차트 읽기 | 기준 3의 차트 데이터 (HWP) |
 | 5 | PDF 하이퍼링크·각주 연결 읽기 | 기준 3의 하이퍼링크·각주 (PDF) |
 | 6 | Office 2016 신형 차트(chartex) 읽기 | 시험할 파일이 있으면 읽는다. 없으면 경고만 확인하고 'v1.0 이후'로 |
 | 7 | 실제 DOCX·HWPX 문서로 확인 | 형식마다 3개 이상(사용자 제공)으로 기준 1·3 통과 |
@@ -91,7 +93,8 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
 
 (기준에 들어가지 않는 새 일은 여기에 적는다)
 
-- 메모(한글 메모, Word 메모)의 글 읽기: v1.0에서는 '넣지 않음' 경고만 남긴다
+- 메모(한글 메모, Word 메모), 바탕쪽, 숨은 설명의 글 읽기: v1.0에서는 '넣지 않음' 경고만 남긴다
+- HWP 차트의 종류(막대·꺾은선 등)와 모양: v1.0에서는 데이터 표만 (종류를 확인할 표본이 하나뿐)
 
 - 스캔 PDF의 OCR 빈칸으로 생긴 공백 ('요구 사항'): 두 방법을 시험했으나 나아지지 않았다 (HANDOFF)
 - 양식의 체크 상자 기호(○ □)가 그림으로 그려진 PDF

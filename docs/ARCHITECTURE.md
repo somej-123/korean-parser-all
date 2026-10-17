@@ -106,6 +106,14 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
 - 글자 겹침(`tcps`, 확장 컨트롤 23)과 덧말(`tdut`)의 글은 문단 글이 아니라 컨트롤 자료에 있다: 겹침은 글자(WORD 길이 +
   WCHAR[]) 뒤 테두리 1·크기 1·펼침 1·글자 모양 수 1바이트와 모양 id들, 덧말은 본말·덧말 글 뒤 위치·비율·옵션·스타일·정렬
   (UINT 5개). hp:compose·hp:dutmal로 옮긴다. 실제 제안요청서의 체크 표시('□'+'√' 겹침)가 이것이었다.
+- 차트: BinData 종류 2(STORAGE)는 레코드에 확장자가 없고 스트림 이름이 'BIN0001.OLE'다. 그 안(앞 4바이트 뒤 OLE 복합
+  파일)의 `Contents`가 한글 차트(VtChart 직렬화)다. 데이터 표만 읽는다 (`hwp/chart.py`): 칸마다 순번(u32, 1씩 늘어남) +
+  종류 번호(u32) [+ 처음 나온 종류의 선언] + 값(VtString: CP949와 UTF-16 두 벌, VtInteger·VtDouble·VtSingle). 열 이름 → 행마다
+  행 이름 + 값. 모든 행이 열 수만큼 값을 가질 때만 Chart(chart_type='unknown')로, 아니면 'OLE 개체는 표시하지 않음'.
+- 개체 캡션: 컨트롤 바로 아래, 개체 레코드(SHAPE_COMPONENT·EQEDIT·TABLE)보다 앞의 LIST_HEADER(캡션 속성 0~1비트 방향) +
+  형제 문단 → hp:caption. 표는 TABLE 레코드 앞의 LIST_HEADER가 캡션이고 뒤가 칸이다.
+- 바탕쪽(구역 정의 아래 문단), 숨은 설명(tcmt), 문단 바로 아래 컨트롤 없이 달린 글 목록(hwplib etc.hwp, 메모·변경 기록으로
+  보이나 확인 못 함)의 글은 읽지 않고 경고를 남긴다.
 - 문서 요약 정보(HwpSummaryInformation)는 직접 읽는다. olefile은 UTF-16 문자열 길이를 바이트로 읽어 뒤 속성까지 섞었다.
 - 실제 제안요청서 5개: 한컴오피스 미리보기 글 재현율 1.000, 본문 글자 수가 레코드 글자 수와 같다 (정규화로 바뀐 'ｏ'·'ㆍ' 등만 다름).
 

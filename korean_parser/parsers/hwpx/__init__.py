@@ -257,6 +257,7 @@ class HwpxParser:
                 script = kid(el, "script")
                 if script is not None and script.text:
                     inlines.append(Equation(script=script.text.strip()))
+                self._caption(el, after)
             elif name == "switch":
                 self._switch(el, style, inlines, before, after, state)
             elif name in DRAWING_TAGS or name in ("chart", "ole"):
@@ -439,7 +440,15 @@ class HwpxParser:
                 return
             chart.id, chart.prov = self._new_id(), self._prov()
             after.append(chart)
+            self._caption(el, after)
             return
+        if name == "ole":
+            chart = self._ole_chart(el, w, h)  # HWP 차트 (OLE 안의 데이터 표)
+            if chart is not None:
+                chart.id, chart.prov = self._new_id(), self._prov()
+                after.append(chart)
+                self._caption(el, after)
+                return
         if name == "ole" and next((c for c in el.iter() if ln(c) == "img"), None) is None:
             self._warn("OLE 개체는 표시하지 않음")
             return  # 미리보기 그림이 있는 OLE는 아래에서 그림으로 표시한다
@@ -464,6 +473,10 @@ class HwpxParser:
         slot = after if drawing.anchor.wrap == "top_bottom" else before
         slot.append(drawing)
         self._caption(el, slot)
+
+    def _ole_chart(self, el, w: float, h: float):
+        """OLE 개체가 차트면 Chart. HWPX의 차트는 hp:chart(OOXML)로 따로 오므로 여기서는 없다 (HWP 파서가 바꾼다)."""
+        return None
 
     def _caption(self, el, slot) -> None:
         """개체 캡션(hp:caption의 글)을 개체 바로 뒤(위쪽 캡션이면 바로 앞) 문단으로 둔다.

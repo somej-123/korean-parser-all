@@ -339,3 +339,53 @@ def test_object_between_text_splits_paragraph():
     kinds = [(type(b).__name__, getattr(b, "text", "")) for b in doc.blocks]
     assert kinds == [("Paragraph", "앞 글"), ("Drawing", ""), ("Paragraph", "뒤 글"),
                      ("Paragraph", "글상자 뒤에만 글"), ("Drawing", "")]
+
+
+def _vt(idx: int, cls: int, name: str | None, payload: bytes) -> bytes:
+    """VtChart 직렬화 칸: 순번 + 종류 번호 [+ 처음 나온 종류의 선언] + 값."""
+    decl = b""
+    if name:
+        n = (name + "\0").encode("ascii")
+        decl = struct.pack("<H", len(n)) + n + struct.pack("<H", 1)
+    return struct.pack("<II", idx, cls) + decl + payload
+
+
+def _vt_str(text: str) -> bytes:
+    raw = text.encode("cp949") + b"\0" + b"\0" + (text + "\0").encode("utf-16-le")
+    return struct.pack("<H", len(raw)) + raw
+
+
+def test_hwp_chart_data_grid():
+    # 한글 차트(OLE 안 VtChart)의 데이터 표: 열 이름 → 행마다 행 이름 + 값. hwplib '차트.hwp'의 배치 그대로
+    from korean_parser.parsers.hwp.chart import parse_grid
+
+    data = b"VtChart\0..VtDataGrid\0" + b"\x00" * 6
+    data += _vt(2, 5, "VtString", _vt_str("1분기")) + _vt(3, 5, None, _vt_str("2분기"))
+    data += _vt(4, 5, None, _vt_str("매출")) + _vt(5, 7, "VtInteger", struct.pack("<i", 92))
+    data += _vt(6, 7, None, struct.pack("<i", 82))
+    data += _vt(7, 5, None, _vt_str("비용")) + _vt(8, 9, "VtDouble", struct.pack("<d", 12.5))
+    data += _vt(9, 9, None, struct.pack("<d", 30.0)) + b"\x00\x08\x00VtBackdrop\0"
+    assert parse_grid(data) == (["1분기", "2분기"], ["매출", "비용"], [[92.0, 82.0], [12.5, 30.0]])
+    # 행마다 값 수가 열 수와 다르면 차트로 보지 않는다 ('OLE 개체는 표시하지 않음'으로 남는다)
+    broken = data.replace(_vt(9, 9, None, struct.pack("<d", 30.0)), b"")
+    assert parse_grid(broken) is None
+
+
+def test_hwp_caption_hidden_comment_and_master_page():
+    # 개체 캡션(컨트롤 아래, 개체 레코드 앞의 LIST_HEADER + 문단)은 개체 뒤 문단으로 읽는다.
+    # 숨은 설명(tcmt)·바탕쪽(구역 정의 아래 문단)의 글은 v1.0에서 읽지 않고 경고를 남긴다
+    caption = rec(Tag.LIST_HEADER, 2, struct.pack("<hHII", 1, 0, 0, 3) + bytes(14)) + para(2, "그림 1. 흐름")
+    obj = gso(1, 7, 10000, 5000) + caption + rec(Tag.SHAPE_COMPONENT, 2, component("$rec", 10000, 5000, instid=8))
+    obj += rect_points(3, 10000, 5000)
+    tcmt = rec(Tag.CTRL_HEADER, 1, b"tmct") + rec(Tag.LIST_HEADER, 2, struct.pack("<hHI", 1, 0, 0)) + para(2, "숨은 글")
+    secd = rec(Tag.CTRL_HEADER, 1, b"dces" + struct.pack("<IHHHIH", 0, 0, 0, 0, 8000, 1) + bytes(20))
+    secd += rec(Tag.LIST_HEADER, 2, struct.pack("<hHI", 1, 0, 0)) + para(2, "바탕쪽 글")
+    data = para(0, ctrl(2, "secd") + "본문", extra=secd)
+    data += para(0, ctrl(11, "gso "), extra=obj)
+    data += para(0, ctrl(15, "tcmt") + "끝", extra=tcmt)
+    doc = HwpParser("extras.hwp", file=FakeFile(data)).parse()
+    kinds = [(type(b).__name__, getattr(b, "text", "")) for b in doc.blocks]
+    assert ("Paragraph", "그림 1. 흐름") in kinds and kinds.index(("Paragraph", "그림 1. 흐름")) == \
+        [k for k, _ in kinds].index("Drawing") + 1
+    assert "숨은 설명의 글은 넣지 않음" in doc.warnings and "바탕쪽의 글은 넣지 않음" in doc.warnings
+    assert not any("숨은 글" in t or "바탕쪽 글" in t for _, t in kinds)

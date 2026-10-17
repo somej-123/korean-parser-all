@@ -27,7 +27,7 @@ from pathlib import Path
 
 from lxml import etree
 
-from ...ir import Document, Image, Meta, Provenance
+from ...ir import Chart, ChartSeries, Document, Image, Meta, Provenance
 from ..hwpx import HwpxParser
 from ..hwpx.header import Counters, Header
 from ..hwpx.shapes import ShapeReader
@@ -186,6 +186,24 @@ def _sub(parent, tag: str, **attrs):
     return el
 
 
+def _has_text(paras: list[Record]) -> bool:
+    """문단 레코드들에 보이는 글자가 있는가 (8글자짜리 컨트롤은 건너뛴다)."""
+    for p in paras:
+        for t in p.kids(Tag.PARA_TEXT):
+            chars, i = t.data.decode("utf-16-le", "replace"), 0
+            while i < len(chars):
+                c = ord(chars[i])
+                if c >= 32:
+                    if not chars[i].isspace():
+                        return True
+                    i += 1
+                else:
+                    i += 1 if c in _CHAR_CTRL else 8
+        if _has_text(p.kids(Tag.PARA_HEADER)):
+            return True
+    return False
+
+
 class _DocInfo:
     """DocInfo 레코드를 HWPX header.xml 모양의 XML로 옮긴다. 그림 목록(id → 스트림 이름, 압축 여부)도 모은다."""
 
@@ -249,7 +267,8 @@ class _DocInfo:
         if kind == 0:  # 바깥 파일에 연결된 그림: 문서 안에 없다
             return
         bid = rd.u16()
-        ext = rd.text() if kind == 1 else ""
+        # 1 EMBEDDING: 레코드에 확장자가 있다. 2 STORAGE(OLE 개체, 차트 등): 확장자 없이 스트림 이름이 'BIN0001.OLE'
+        ext = rd.text() if kind == 1 else "OLE" if kind == 2 else ""
         name = f"BIN{bid:04X}" + (f".{ext}" if ext else "")
         compressed = self.compressed if comp == 0 else comp == 1
         self.bins[bid] = (name, compressed)
@@ -365,6 +384,9 @@ class _Body:
             parent.append(self._paragraph(p))
 
     def _paragraph(self, p: Record):
+        if _has_text(p.kids(Tag.PARA_HEADER)):
+            # 문단 바로 아래(컨트롤 없이) 달린 LIST_HEADER + 문단: 메모·변경 기록으로 보이나 확인하지 못했다 (hwplib etc.hwp)
+            self.warn("본문 밖 글 목록(메모 등)의 글은 넣지 않음")
         rd = Reader(p.data)
         rd.u32()
         rd.u32()  # 컨트롤 마스크
@@ -464,7 +486,9 @@ class _Body:
             if eq is not None:
                 rd = Reader(eq.data)
                 rd.u32()
-                _sub(_sub(run, "equation"), "script").text = rd.text()
+                eq_el = _sub(run, "equation")
+                _sub(eq_el, "script").text = rd.text()
+                self._caption(eq_el, ctrl)
         elif cid == "tcps":
             # 글자 겹침: 겹칠 글자는 문단 글이 아니라 컨트롤에 있다 (WORD 길이 + WCHAR[]).
             # 실제 제안요청서의 '□'+'√'(체크한 네모) 6개가 이것이었다: 읽지 않으면 어느 칸에 체크했는지가 사라진다
@@ -482,6 +506,10 @@ class _Body:
                       option=option, styleIDRef=style, align=_ALIGN.get(align, "JUSTIFY"))
             _sub(el, "mainText").text = main
             _sub(el, "subText").text = sub
+        elif cid == "tcmt":
+            # 숨은 설명: 인쇄되지 않는 설명 글. v1.0에서는 읽지 않고 알린다 (docs/GOAL.md)
+            if _has_text(ctrl.kids(Tag.PARA_HEADER)):
+                self.warn("숨은 설명의 글은 넣지 않음")
         elif cid in ("head", "foot"):
             rd = Reader(ctrl.data, 4)
             kind = "header" if cid == "head" else "footer"
@@ -519,6 +547,9 @@ class _Body:
             attr = pr.u32()
             pp = _sub(sec, "pagePr", width=w, height=h, landscape="NARROWLY" if attr & 0x1 else "WIDELY")
             _sub(pp, "margin", left=left, right=right, top=top, bottom=bottom, header=header, footer=footer)
+        if _has_text(ctrl.kids(Tag.PARA_HEADER)):
+            # 구역 정의 아래 LIST_HEADER + 문단 = 바탕쪽. 아직 읽지 않고 알린다 (HWPX의 masterpage와 같다)
+            self.warn("바탕쪽의 글은 넣지 않음")
         for i, pbf in enumerate(ctrl.kids(Tag.PAGE_BORDER_FILL)[:3]):
             br = Reader(pbf.data)
             br.u32()
@@ -566,10 +597,14 @@ class _Body:
         self._place(tbl, common)
         if info is not None:
             _sub(tbl, "inMargin", left=left, right=right, top=top, bottom=bottom)
-        # 칸: LIST_HEADER 뒤에 그 칸의 문단이 '형제'로 이어진다
+        self._caption(tbl, ctrl)
+        # 칸: LIST_HEADER 뒤에 그 칸의 문단이 '형제'로 이어진다. TABLE 레코드 앞의 LIST_HEADER는 캡션이다
         cells: list[tuple[Record, list[Record]]] = []
+        seen_table = info is None
         for r in ctrl.children:
-            if r.tag == Tag.LIST_HEADER:
+            if r.tag == Tag.TABLE:
+                seen_table = True
+            elif r.tag == Tag.LIST_HEADER and seen_table:
                 cells.append((r, []))
             elif r.tag == Tag.PARA_HEADER and cells:
                 cells[-1][1].append(r)
@@ -603,6 +638,33 @@ class _Body:
             return
         el.set("id", str(common["id"]))
         self._place(el, common)
+        self._caption(el, ctrl)
+
+    def _caption(self, el, ctrl: Record) -> None:
+        """개체 캡션 → hp:caption/hp:subList (HWPX 파서가 개체 뒤 문단으로 읽는다).
+
+        컨트롤 바로 아래, 개체 레코드(SHAPE_COMPONENT·EQEDIT·TABLE)보다 앞의 LIST_HEADER와 그 뒤 형제 문단이 캡션이다.
+        LIST_HEADER: 문단 수 2, 2, 목록 속성 4, 캡션 속성 4(0~1비트 방향: 왼쪽·오른쪽·위·아래) … (hwplib 글상자·수식 시험 파일)
+        """
+        kids = ctrl.children
+        for i, r in enumerate(kids):
+            if r.tag in (Tag.TABLE, Tag.SHAPE_COMPONENT, Tag.EQEDIT):
+                return
+            if r.tag != Tag.LIST_HEADER:
+                continue
+            rd = Reader(r.data)
+            rd.i16()
+            rd.u16()
+            rd.u32()
+            attr = rd.u32()
+            paras = []
+            for q in kids[i + 1:]:
+                if q.tag != Tag.PARA_HEADER:
+                    break
+                paras.append(q)
+            cap = _sub(el, "caption", side=("LEFT", "RIGHT", "TOP", "BOTTOM")[attr & 0x3])
+            self._paragraphs(_sub(cap, "subList"), paras)
+            return
 
     def _component(self, parent, sc: Record, top: bool):
         """개체 요소 하나 → HWPX 개체 요소. 레코드 배치 (실제 파일과 hwplib으로 확인):
@@ -751,7 +813,12 @@ class _Body:
         _sub(el, "img", binaryItemIDRef=f"bin{rd.u16()}")
 
     def _ole_geometry(self, el, sc: Record) -> None:
-        pass  # OLE 개체는 HWPX 파서가 '표시하지 않음'으로 알린다
+        # SHAPE_COMPONENT_OLE: 속성 4, 크기 x·y 8, BinData 번호 2 … (차트면 HWPX 파서가 데이터 표를 읽고, 아니면 '표시하지 않음')
+        r = sc.kid(Tag.SHAPE_COMPONENT_OLE)
+        if r is not None and len(r.data) >= 14:
+            rd = Reader(r.data)
+            rd.skip(12)
+            el.set("binaryItemIDRef", f"bin{rd.u16()}")
 
 
 # 그리기 개체의 컨트롤 id → HWPX 요소 이름
@@ -888,6 +955,24 @@ class HwpParser(HwpxParser):
             v = props.get(key)
             if v is not None and hasattr(v, "isoformat"):
                 setattr(m, attr, v.isoformat())
+
+    def _ole_chart(self, el, w: float, h: float):
+        """OLE 개체가 한글 차트(VtChart)면 데이터 표를 Chart로. 차트 종류는 정하지 않는다 (hwp/chart.py)."""
+        from .chart import read_chart_grid
+
+        try:
+            bid = int((el.get("binaryItemIDRef") or "").removeprefix("bin"))
+        except ValueError:
+            return None
+        name, compressed = self._bins.get(bid, (None, False))
+        data = self.file.bin_data(name, compressed) if name else None
+        grid = read_chart_grid(data) if data else None
+        if grid is None:
+            return None
+        cols, rows, values = grid
+        return Chart(id="", prov=self._prov(), chart_type="unknown", categories=rows,
+                     series=[ChartSeries(name=c, values=[row[j] for row in values]) for j, c in enumerate(cols)],
+                     width_pt=w or None, height_pt=h or None)
 
     def _image_id(self, ref: str | None) -> str | None:
         if not ref:

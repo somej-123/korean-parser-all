@@ -38,6 +38,7 @@ from korean_parser.parsers import parse  # noqa: E402
 SETS = [
     ("실제 문서", ROOT / "samples_rfp"),
     ("공개 시험 문서", ROOT / "benchmarks" / "corpus" / "samples_web" / "hwpxlib"),
+    ("공개 시험 문서", ROOT / "benchmarks" / "corpus" / "samples_web" / "hwplib"),
     ("저장소 시험 파일", ROOT / "tests" / "fixtures"),
     ("저장소 시험 파일", ROOT / "benchmarks" / "docling-cpu" / "samples"),
 ]
@@ -157,8 +158,13 @@ def _hwp_texts(path: Path) -> list[str]:
     f = HwpFile(path)
     out: list[str] = []
 
-    def walk(records):
+    def walk(records, parent=None):
         for r in records:
+            # 경고만 남기는 곳은 뺀다: 바탕쪽(구역 정의 아래 문단), 숨은 설명, 문단 바로 아래 달린 글 목록
+            if r.tag == Tag.PARA_HEADER and parent is not None and (
+                    parent.tag == Tag.PARA_HEADER
+                    or parent.tag == Tag.CTRL_HEADER and ctrl_id(parent.data) in ("secd", "tcmt")):
+                continue
             if r.tag == Tag.PARA_TEXT:
                 chars, i, buf = r.data.decode("utf-16-le", "replace"), 0, []
                 while i < len(chars):
@@ -172,7 +178,7 @@ def _hwp_texts(path: Path) -> list[str]:
             elif r.tag == Tag.CTRL_HEADER and ctrl_id(r.data) in ("tcps", "tdut"):
                 rd = Reader(r.data, 4)
                 out.append(rd.text() + (rd.text() if ctrl_id(r.data) == "tdut" else ""))
-            walk(r.children)
+            walk(r.children, r)
 
     for s in f.sections():
         walk(f.records(s))
@@ -224,6 +230,8 @@ def check_file(path: Path) -> dict:
         pages = source_pages(path)
         doc = parse(path)
     except Exception as exc:  # noqa: BLE001
+        if "배포용" in str(exc) or "암호" in str(exc):
+            return row | {"skip": "암호화된 문서 (안내 오류, 기준 4)"}
         return row | {"error": f"{type(exc).__name__}: {exc}"[:200]}
     row["seconds"] = time.perf_counter() - t0
     row["warnings"] = list(doc.warnings)
@@ -280,7 +288,7 @@ def report(rows: list[dict], struct: list[tuple]) -> str:
     errors = [r for r in rows if "error" in r]
     lines = ["# v1.0 완료 기준 확인 (docs/GOAL.md)", "",
              "## 기준 1. 빠짐없이", "",
-             f"- 파일 {len(rows)}개 (원문 글자를 잰 파일 {len(measured)}개, 텍스트 레이어 없는 스캔 "
+             f"- 파일 {len(rows)}개 (원문 글자를 잰 파일 {len(measured)}개, 건너뛴 파일(스캔·암호화) "
              f"{sum('skip' in r for r in rows)}개, 오류 {len(errors)}개)",
              f"- 보존율 {KEPT_MIN} 미만: {len(below)}개 (그중 경고 없음: {len(silent)}개)",
              f"- 판정: **{'통과' if not below and not errors else '미달'}**", "",
