@@ -14,6 +14,18 @@ python run.py samples_web --out corpus_report.md
 | [hwpxlib](https://github.com/neolord0/hwpxlib) `testFile` | HWPX | 49 | Apache-2.0 |
 | [hwplib](https://github.com/neolord0/hwplib) `sample_hwp` | HWP | 44 | Apache-2.0 |
 
+## 공공데이터포털 파일데이터로 시험하기
+
+공공기관이 올린 문서 파일(지침, 공고, 보고서, 시험 문제지, 양식 …)을 형식마다 몇 개씩 받는다. 서비스 키는 필요 없다.
+
+```bash
+python fetch_datagokr.py --out ../../samples_rfp/datagokr      # HWPX 12, DOCX 12, PDF 12, PPTX 8, XLSX 6, HWP 4개 데이터
+python ../goal/check.py --folder ../../samples_rfp/datagokr --skip-eval --out datagokr_report.md
+```
+
+포털이 보안 문자를 요구하면 멈춘다 (다시 실행하면 이어 받는다). 받은 파일은 저장소에 올리지 않고, 출처는 받은 폴더의
+`sources.json`에 남는다. 2026-10-17에 받은 147개 문서로 찾은 문제와 결과는 `docs/GOAL.md`에 있다.
+
 ## 나라장터 첨부파일로 시험하기
 
 실제 공공 문서(제안요청서·과업지시서)는 HWP·HWPX·PDF가 섞여 있어 좋은 시험 자료다.

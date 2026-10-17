@@ -173,3 +173,56 @@ def test_symbol_font_bullets():
 
     assert map_symbol("MT Extra", "\uf057") == "□" and map_symbol("Wingdings 2", "\uf081") == "○"
     assert map_symbol("Wingdings", "\uf06f") == "□" and map_symbol("Wingdings 3", "\uf075") == "▶"
+
+
+def _docx(tmp_path, body: str, headers: dict[str, str]) -> Path:
+    """최소 DOCX를 만든다 (본문 XML, 머리말 이름 → 머리말 XML)."""
+    import zipfile
+
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    ns = (f'{w} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+          'xmlns:v="urn:schemas-microsoft-com:vml"')
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    path = tmp_path / "t.docx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" '
+                   'ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/word/document.xml" '
+                   'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')
+        z.writestr("_rels/.rels", f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="word/document.xml"/></Relationships>')
+        z.writestr("word/_rels/document.xml.rels",
+                   '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   + "".join(f'<Relationship Id="{n}" Type="{rel}/header" Target="{n}.xml"/>' for n in headers)
+                   + "</Relationships>")
+        z.writestr("word/document.xml", f"<w:document {ns}><w:body>{body}</w:body></w:document>")
+        for n, xml in headers.items():
+            z.writestr(f"word/{n}.xml", f"<w:hdr {ns}>{xml}</w:hdr>")
+    return path
+
+
+def _p(text: str) -> str:
+    return f"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>"
+
+
+def test_vml_group_reads_every_text_box(tmp_path):
+    # PDF를 바꾼 DOCX는 한 w:pict의 v:group에 글상자가 여럿 있다. 예전에는 첫 글상자만 읽어 나머지 글이 경고 없이 빠졌다
+    box = '<v:shape style="position:absolute;left:{x};top:0;width:400;height:100"><v:textbox><w:txbxContent>{p}' \
+          '</w:txbxContent></v:textbox></v:shape>'
+    group = ('<v:group style="width:100pt;height:20pt" coordsize="1000,200">'
+             + box.format(x=0, p=_p("첫 상자")) + box.format(x=500, p=_p("둘째 상자")) + "</v:group>")
+    path = _docx(tmp_path, f"<w:p><w:r><w:pict>{group}</w:pict></w:r></w:p><w:sectPr/>", {})
+    drawing = next(b for b in parse(path).blocks if isinstance(b, Drawing))
+    texts = [s.text_blocks[0].text for s in drawing.shapes]
+    assert texts == ["첫 상자", "둘째 상자"]
+    # 묶음 좌표(1000 × 200)를 묶음 크기(100pt × 20pt)로 바꾼다
+    assert [(s.x, s.width) for s in drawing.shapes] == [(0, 40), (50, 40)]
+
+
+def test_other_section_headers_are_kept(tmp_path):
+    # 화면용 머리말은 마지막 구역의 기본 머리말이다. 다른 구역·짝수 쪽 머리말도 글이 다르면 뒤에 담는다
+    sect1 = '<w:sectPr><w:headerReference w:type="default" r:id="h1"/><w:headerReference w:type="even" r:id="h2"/></w:sectPr>'
+    body = f"<w:p><w:pPr>{sect1}</w:pPr><w:r><w:t>본문</w:t></w:r></w:p>" \
+           '<w:sectPr><w:headerReference w:type="default" r:id="h3"/></w:sectPr>'
+    path = _docx(tmp_path, body, {"h1": _p("제1편"), "h2": _p("제2편"), "h3": _p("제3편"), "h4": _p("제1편")})
+    assert [b.text for b in parse(path).header] == ["제3편", "제1편", "제2편"]

@@ -9,12 +9,39 @@ PDF 텍스트 레이어에는 이 정보가 글자마다 있으므로, Docling�
 from __future__ import annotations
 
 import ctypes
+import functools
 import io
 import statistics
+import threading
 from collections import Counter
 from dataclasses import dataclass, field
 
 from .rules import read_rules
+
+try:  # Docling도 pdfium을 쓴다 (쪽 읽기 스레드). 같은 잠금을 써야 두 쪽이 동시에 pdfium을 부르지 않는다
+    from docling.utils.locks import pypdfium2_lock as _PDFIUM_LOCK
+except ImportError:  # pragma: no cover - Docling 없이 쓰는 경우
+    _PDFIUM_LOCK = threading.Lock()
+_tls = threading.local()
+
+
+def _pdfium(fn):
+    """pdfium을 부르는 함수를 잠금 안에서 돌린다.
+
+    pdfium은 여러 스레드에서 동시에 쓰면 메모리가 깨진다 (Windows 0xc0000374로 프로그램이 멈췄다). Docling의 잠금은
+    다시 잡을 수 없어서(재진입 불가) 같은 스레드의 바깥 호출에서만 잡는다.
+    """
+    @functools.wraps(fn)
+    def wrap(*args, **kwargs):
+        if getattr(_tls, "depth", 0):
+            return fn(*args, **kwargs)
+        with _PDFIUM_LOCK:
+            _tls.depth = 1
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                _tls.depth = 0
+    return wrap
 
 BBox = tuple[float, float, float, float]  # x0, y0(위), x1, y1(아래)
 
@@ -87,6 +114,11 @@ class PageInfo:
         out = []
         for c in self.chars:
             cx, cy = (c.box[0] + c.box[2]) / 2, (c.box[1] + c.box[3]) / 2
+            # 세로 위치는 기준선에서 글자 크기만큼 위인 글자 칸의 가운데로 본다. 잉크 상자 가운데로 보면 줄 위쪽에 작게
+            # 붙은 따옴표(’25년)의 가운데가 문단 상자 위로 벗어나 첫 줄의 따옴표가 빠졌다
+            ey = c.origin[1] - c.size * 0.35
+            if c.size > 0 and abs(ey - cy) < c.size:
+                cy = ey
             if x0 <= cx <= x1 and y0 <= cy <= y1:
                 out.append(c)
         return out
@@ -163,7 +195,7 @@ class PageInfo:
         flush()
         return runs
 
-    def text_lines(self, box: BBox, pad: float = 1.0) -> list[str]:
+    def text_lines(self, box: BBox, pad: float = 1.0, exclude: list[BBox] | None = None) -> list[str]:
         """영역 안 글을 텍스트 레이어에서 줄 단위로 읽는다 (내용 순서).
 
         PDF에 실제로 있는 공백 글자는 그대로 두고, pdfium이 끼워 넣은 공백은 글자 사이에 실제 간격이 있을 때만
@@ -172,6 +204,10 @@ class PageInfo:
         한글과 영문·숫자 사이의 좁은 간격, 좁은 글꼴의 좁은 낱말 사이(`_narrow_spaces`)는 AMBIGUOUS_GAP으로 표시한다.
         """
         chars = [c for c in _dedupe_overlaps(self.chars_in(box, pad)) if not (c.text.isspace() and c.generated)]
+        if exclude:
+            # 다른 블록이 이미 담은 글자 (그림 영역과 겹친 문단·캡션)
+            chars = [c for c in chars if not any(x[0] <= (c.box[0] + c.box[2]) / 2 <= x[2] and x[1] <= (c.box[1] + c.box[3]) / 2 <= x[3]
+                                                 for x in exclude)]
         if not chars:
             return []
         lines_of = _group_lines(chars)
@@ -251,6 +287,7 @@ class PageInfo:
             return None
         return f"#{r:02X}{g:02X}{b:02X}"
 
+    @_pdfium
     def crop_png(self, box: BBox, scale: float = 2.0) -> bytes | None:
         """영역을 PNG로 잘라 낸다 (그림·도식)."""
         if self._page is None:
@@ -322,6 +359,7 @@ def heavy_by_density(dens: dict[str, list[float]], count: Counter) -> set[str]:
 class PdfPages:
     """PDF 전체 페이지의 PageInfo를 필요할 때 만든다."""
 
+    @_pdfium
     def __init__(self, path):
         import pypdfium2 as pdfium
 
@@ -334,12 +372,14 @@ class PdfPages:
     def __len__(self):
         return len(self.pdf)
 
+    @_pdfium
     def close(self):
         self._cache.clear()
         if self._bg_pdf is not None:
             self._bg_pdf.close()
         self.pdf.close()
 
+    @_pdfium
     def links(self, number: int) -> list[tuple[BBox, str]]:
         """쪽의 바깥 링크 주석 (영역, 주소). 문서 안으로 가는 링크(목차 등)는 뺀다."""
         import pypdfium2.raw as raw
@@ -370,6 +410,7 @@ class PdfPages:
                 raw.FPDFPage_CloseAnnot(annot)
         return out
 
+    @_pdfium
     def heavy_fonts(self, pages: int = 6, per_font: int = 60) -> set[str]:
         """굵기 정보 없이 굵게 그려지는 글꼴 이름들 (문서마다 한 번 계산).
 
@@ -413,6 +454,7 @@ class PdfPages:
         self._heavy = heavy_by_density(dens, count)
         return self._heavy
 
+    @_pdfium
     def background_png(self, number: int, scale: float = 1.5) -> bytes | None:
         """글자를 지운 페이지 그림 (선·상자·색·이미지만). 고정 레이아웃의 바탕으로 쓴다.
 
@@ -441,6 +483,7 @@ class PdfPages:
         img.save(buf, "PNG", compress_level=6)
         return buf.getvalue()
 
+    @_pdfium
     def has_text_layer(self, sample: int = 5, min_chars: int = 30) -> bool:
         n = min(len(self.pdf), sample)
         if n == 0:
@@ -452,6 +495,7 @@ class PdfPages:
             tp.close()
         return total / n >= min_chars
 
+    @_pdfium
     def page(self, number: int) -> PageInfo:
         if number not in self._cache:
             self._cache[number] = self._load(number)

@@ -129,3 +129,12 @@ def test_superscript_joins_its_line():
     page = PageInfo(number=1, width=600, height=800, chars=body[:2] + [sup] + body[2:])
     assert page.text_lines((0, 80, 200, 110)) == ["기관1이다"]
     assert [(t, b, a) for _, t, b, a in page.superscripts()] == [("1", "기관", "이다")]
+
+
+def test_high_quote_mark_stays_in_its_line_box():
+    # 줄 위쪽에 작게 붙은 따옴표(’25년)는 잉크 상자 가운데가 문단 상자 위로 벗어난다. 기준선으로 보면 같은 줄이다
+    quote = Char("’", (104.5, 89.5, 105.5, 91.5), 10.0, False, False, "#000000", "", (104.0, 100.0), 3.0)
+    chars = [ch("(", 100.0, 10.0, 4.0), quote, ch("2", 107.0, 10.0, 5.0), ch("5", 112.0, 10.0, 5.0)]
+    page = PageInfo(number=1, width=600, height=800, chars=chars)
+    # 문단 상자 위쪽 끝(93)이 따옴표 잉크 상자(89.5~91.5)보다 아래에 있다
+    assert "".join(page.text_lines((95.0, 93.0, 130.0, 101.0))) == "(’25"

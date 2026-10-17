@@ -33,6 +33,7 @@ from lxml import etree  # noqa: E402
 from korean_parser.ir import walk_blocks  # noqa: E402
 from korean_parser.normalize import normalize_text  # noqa: E402
 from korean_parser.parsers import parse  # noqa: E402
+from korean_parser.parsers.pdf.page import _PDFIUM_LOCK  # noqa: E402  (Docling의 쪽 읽기 스레드와 pdfium을 나눠 쓴다)
 
 # 기준 문서 묶음 (docs/GOAL.md). 없는 폴더는 건너뛴다
 SETS = [
@@ -89,16 +90,26 @@ def _xml_texts(z: zipfile.ZipFile, name: str, tag: str, skip_fallback: bool = Fa
     return out
 
 
+def _pdf_pages(path: Path) -> list[list[str]] | None:
+    import pypdfium2 as pdfium
+
+    pdf = pdfium.PdfDocument(str(path))
+    # 쪽 안에 보이는 글자만 센다. 두 쪽에 걸친 표를 두 쪽 모두에 통째로 그려 두고 쪽마다 반쪽만 보이게 한 PDF가 있다
+    # (교육훈련계획: 28쪽 밖으로 나간 글자 1,073개 = 29쪽에 보이는 글). 쪽 밖 글자까지 세면 같은 글을 두 번 센다
+    pages = []
+    for i in range(len(pdf)):
+        left, bottom, right, top = pdf[i].get_cropbox()
+        pages.append(pdf[i].get_textpage().get_text_bounded(left, bottom, right, top).splitlines())
+    pdf.close()
+    return pages if sum(len(norm("".join(p))) for p in pages) >= 20 else None
+
+
 def source_pages(path: Path) -> list[list[str]] | None:
     """원문의 쪽마다 글 줄. 텍스트 레이어가 없는 PDF(스캔)는 None."""
     ext = path.suffix.lower()
     if ext == ".pdf":
-        import pypdfium2 as pdfium
-
-        pdf = pdfium.PdfDocument(str(path))
-        pages = [pdf[i].get_textpage().get_text_range().splitlines() for i in range(len(pdf))]
-        pdf.close()
-        return pages if sum(len(norm("".join(p))) for p in pages) >= 20 else None
+        with _PDFIUM_LOCK:
+            return _pdf_pages(path)
     with zipfile.ZipFile(path) if ext in (".docx", ".hwpx", ".pptx", ".xlsx") else _NoZip() as z:
         if ext == ".docx":
             names = [n for n in z.namelist() if re.match(r"word/(document|header\d*|footer\d*|footnotes|endnotes)\.xml$", n)]
@@ -188,22 +199,50 @@ def _hwp_texts(path: Path) -> list[str]:
     return out
 
 
-def source_counter(pages: list[list[str]]) -> collections.Counter:
-    """원문 글자 모음. 여러 쪽에 되풀이되는 줄은 한 번, 쪽 번호 같은 숫자 줄은 뺀다."""
+def edge_lines(path: Path) -> set[str]:
+    """PDF 쪽의 위·아래 끝(높이의 12% 안)에 있는 줄 (norm). 파서는 두 쪽 이상에 나오는 이런 줄을 머리말·꼬리말로 보고
+    글(숫자 빼고)마다 한 번만 남긴다."""
+    if path.suffix.lower() != ".pdf":
+        return set()
+    import pypdfium2 as pdfium
+
+    out: set[str] = set()
+    with _PDFIUM_LOCK:
+        pdf = pdfium.PdfDocument(str(path))
+        for i in range(len(pdf)):
+            page = pdf[i]
+            w, h = page.get_size()
+            tp = page.get_textpage()
+            for top, bottom in ((h, h * 0.88), (h * 0.12, 0)):
+                out.update(norm(ln) for ln in tp.get_text_bounded(0, bottom, w, top).splitlines() if norm(ln))
+        pdf.close()
+    return out
+
+
+def source_counter(pages: list[list[str]], edges: set[str] | None = None) -> collections.Counter:
+    """원문 글자 모음. 여러 쪽에 되풀이되는 줄은 한 번, 쪽 번호 같은 숫자 줄은 뺀다.
+
+    edges(쪽 위·아래 끝의 줄)는 두 쪽 이상에 나오면 한 번만 센다 (장마다 바뀌는 머리말)."""
     lines = [[norm(ln) for ln in p] for p in pages]
-    # 두 쪽 이상에 절반 넘게 되풀이되는 줄 (PDF는 두 쪽에 걸친 머리말도 한 번만 남긴다)
-    seen = collections.Counter(ln for p in lines for ln in set(p) if ln)
-    repeated = {ln for ln, c in seen.items() if c >= max(2, len(lines) / 2)} if len(lines) >= 2 else set()
+    # 두 쪽 이상에 절반 넘게 되풀이되는 줄 (PDF는 두 쪽에 걸친 머리말도 한 번만 남긴다).
+    # 숫자만 다른 줄('… 국어 책형 2쪽', '3쪽')도 같은 줄로 본다 (쪽 번호가 든 머리말)
+    def key(ln: str) -> str:
+        return re.sub(r"\d+", "#", ln)
+
+    seen = collections.Counter(k for p in lines for k in {key(ln) for ln in p if ln})
+    repeated = {k for k, c in seen.items() if c >= max(2, len(lines) / 2)} if len(lines) >= 2 else set()
+    edge_keys = {key(ln) for ln in edges or ()}
+    repeated |= {k for k, c in seen.items() if c >= 2 and k in edge_keys}
     out: collections.Counter = collections.Counter()
     counted: set[str] = set()
     for p in lines:
         for ln in p:
             if not ln or (_PAGE_NO.match(ln) and len(lines) > 1):
                 continue
-            if ln in repeated:
-                if ln in counted:
+            if key(ln) in repeated:
+                if key(ln) in counted:
                     continue
-                counted.add(ln)
+                counted.add(key(ln))
             out.update(ln)
     return out
 
@@ -240,7 +279,7 @@ def check_file(path: Path) -> dict:
     if pages is None:
         row["skip"] = "텍스트 레이어 없음 (스캔: 기준 2에서 잰다)"
         return row
-    src, ours = source_counter(pages), collections.Counter(norm(our_text(doc)))
+    src, ours = source_counter(pages, edge_lines(path)), collections.Counter(norm(our_text(doc)))
     total = sum(src.values())
     row["chars"] = total
     row["kept"] = sum((src & ours).values()) / total if total else 1.0
@@ -348,9 +387,10 @@ def main() -> int:
     p.add_argument("--out", default="goal_report.md")
     p.add_argument("--skip-eval", action="store_true", help="기준 2(정답 세트 평가) 생략")
     p.add_argument("--no-pdf", action="store_true", help="텍스트 레이어 PDF 생략 (느림)")
+    p.add_argument("--folder", type=Path, help="기준 문서 묶음 대신 이 폴더만 잰다 (새로 모은 문서 점검)")
     args = p.parse_args()
     rows = []
-    for set_name, folder in SETS:
+    for set_name, folder in ([("지정 폴더", args.folder.resolve())] if args.folder else SETS):
         if not folder.exists():
             continue
         for f in sorted(folder.rglob("*")):

@@ -43,7 +43,7 @@
 | 합성 정답 세트 | `benchmarks/eval/data` (`synth.py`로 만듦) | 제안요청서 12개 (DOCX, PDF), 스캔 4개 |
 | 공개 시험 문서 | `benchmarks/corpus/samples_web/hwpxlib`, `…/hwplib`, `…/poi` (`fetch_samples.sh`) | hwpxlib HWPX 49개, hwplib HWP 44개, Apache POI chartex.docx 1개 (모두 Apache-2.0) |
 | 저장소 시험 파일 | `tests/fixtures`, `benchmarks/docling-cpu/samples` | DOCX·HWPX·PDF·PPTX·XLSX, 스캔 1개 |
-| 실제 문서 | `samples_rfp/` (저장소에 넣지 않음) | 2026-10-17: HWP 5, PDF 3, PPTX 4, XLSX 2 |
+| 실제 문서 | `samples_rfp/` (저장소에 넣지 않음) | 2026-10-17: HWP 5, PDF 3, PPTX 4, XLSX 2. 공공데이터포털 147개(`samples_rfp/datagokr`, `benchmarks/corpus/fetch_datagokr.py`): DOCX 45, PDF 39(스캔 3), HWPX 28, HWP 12, XLSX 9, PPTX 8 |
 | 표본 문서 | `benchmarks/goal/samples` (`make_docx.py`, `make_hwp.py`) | DOCX 3, HWPX 2, HWP 2. 들어 있어야 할 요소 목록(.json) 포함 |
 
 남은 일 7번에서 실제 DOCX·HWPX를 더한다. 묶음을 바꾸면 이 표를 고친다.
@@ -76,6 +76,12 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
 - 7번 뒤 (v0.18.0): 표본 문서 7개와 요소 목록으로 기준 3을 잰다. 표본에서 찾아 고친 것: Word 수식(OMML)이 빠짐,
   LibreOffice가 쓴 □ ○ 글머리표(MT Extra·Wingdings 2)가 깨짐, 한글의 짝수 쪽 머리말이 경고 없이 빠짐.
   **기준 1(135개 파일)·2(11개 지표)·3(요소 113개) 모두 통과.** 기준 4는 시험(241개)으로 지킨다.
+- 공공데이터포털 문서 147개를 더한 뒤 (v0.19.0): 처음 재니 0.99 미만이 15개(경고 없음 14개)였다. 찾아 고친 것:
+  DOCX VML 그림 묶음(v:group)의 둘째 글상자부터와 다른 구역의 머리말이 빠짐, PDF 그림 안 글(목록 묶음 아래 글, Docling이
+  자식으로 넣지 않은 글)이 빠짐, 목록 항목의 ‘ ’가 '로 바뀜, 문단 첫 줄 위쪽 따옴표(’25년)가 빠짐, 폭이 깨진 글꼴의
+  줄 끝 ')'가 빠짐, 장마다 바뀌는 PDF 머리말이 빠짐. 측정 쪽 잘못(쪽 번호만 다른 머리말을 따로 셈, 쪽 밖에 그려진 글자를
+  셈)도 바로잡았다. 결과: **파일 264개 중 0.99 미만 1개, 경고 없이 빠진 파일 0개.** 남은 1개는 82만 칸짜리 XLSX 조사
+  원자료로, 칸 수 제한(20만 칸)에 걸려 경고와 함께 앞부분만 넣었다. 기준 2(11개 지표)·3(요소 113개)은 그대로 통과.
 
 ## 남은 일 (이 순서로)
 
@@ -110,3 +116,5 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
 
 - 스캔 PDF의 OCR 빈칸으로 생긴 공백 ('요구 사항'): 두 방법을 시험했으나 나아지지 않았다 (HANDOFF)
 - 양식의 체크 상자 기호(○ □)가 그림으로 그려진 PDF
+- 공공데이터포털 문서에서 본 구조 문제 (글은 빠지지 않음): PDF 표에서 세로선이 없는 행이 칸 하나로 합쳐짐(교육훈련계획
+  17쪽), 배치가 복잡한 브로슈어의 읽기 순서, 낱자 사이를 벌린 제목의 띄어쓰기('2 0 2 6 년도교육운영방향')

@@ -362,7 +362,13 @@ class PdfParser:
             if len(item.prov) != 1:
                 continue
             prov = item.prov[0]
-            text = self._layer_text(self.pages.page(prov.page_no), self._box(prov, ddoc), item.text)
+            original = item.text
+            marker = (getattr(item, "marker", None) or "").strip()
+            if marker and not original.lstrip().startswith(marker):
+                # 목록 항목: Docling은 기호('7.')를 떼어 두지만 영역에는 기호 글자도 있다. 붙여서 비교해야
+                # 레이어 글을 쓴다 (예전에는 기호만큼 달라 Docling 글이 남고, 그 글의 ‘ ’가 '로 바뀌어 있었다)
+                original = f"{marker} {original}"
+            text = self._layer_text(self.pages.page(prov.page_no), self._box(prov, ddoc), original)
             if text is not None:
                 item.text = text
                 keep.add(id(item))
@@ -498,6 +504,15 @@ class PdfParser:
             return text  # Docling이 글을 비워 둔 영역: 텍스트 레이어에 있는 글이 원문이다
         if a == b or a in b:
             return text
+        if len(b) < len(a) and b in a:
+            # 레이어 글이 Docling 글보다 끝 글자 몇 개가 모자라다. 폭 정보가 깨진 글꼴은 글자 상자가 글자 크기만큼 넓어서
+            # 마지막 글자(')')의 가운데가 Docling 상자 밖에 놓인다. 옆으로 조금 넓혀 다시 읽고 같아지면 그것을 쓴다
+            size = page.style_in(box).size or 10.0
+            wide = page.text_lines((box[0] - size * 0.6, box[1], box[2] + size * 0.6, box[3]))
+            if wide:
+                text2 = _SPACE_BEFORE_PUNCT.sub("", self._resolve_gaps(self._join_lines(wide)))
+                if "".join(text2.split()) == a:
+                    return text2
         # 같은 글자들이면(순서가 조금 다르거나 몇 글자만 달라도) 텍스트 레이어를 믿는다. 짧은 제목은 한 글자만 달라도
         # 비율이 크게 떨어지므로 비율 대신 다른 글자 수로 본다
         sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
@@ -643,8 +658,11 @@ class PdfParser:
                     misplaced.append(self._paragraph(item, page, box))
                 continue
             if item.label == DocItemLabel.PAGE_HEADER and near_top or item.label == DocItemLabel.PAGE_FOOTER and near_bottom:
+                # 머리말·꼬리말은 글(숫자 빼고)마다 한 번 담는다. 장마다 바뀌는 머리말('Ⅱ. 승인기준 19')도 있어서
+                # 1쪽 것만 담으면 나머지 장의 머리말 글이 경고 없이 빠진다 (DOCX·HWPX와 같은 원칙)
                 target = self.doc.header if item.label == DocItemLabel.PAGE_HEADER else self.doc.footer
-                if page_no == 1 and not any(getattr(b, "text", None) == item.text for b in target):
+                key = _strip_digits(item.text)
+                if not any(_strip_digits(getattr(b, "text", "") or "") == key for b in target):
                     target.append(self._paragraph(item, page, box))
                 continue
             if near_top or near_bottom:
@@ -1384,7 +1402,18 @@ class PdfParser:
         """
         from docling_core.types.doc import DocItemLabel, TextItem
 
-        used: set[str] = {c.cref for c in item.children} | {c.cref for c in item.captions}
+        # 그림 아래 글은 목록 묶음(ListGroup) 같은 묶음 아래에 한 단계 더 들어 있기도 하다. 끝까지 따라 내려간다
+        # (예전에는 바로 아래 자식만 읽어 묶음 안 글이 경고 없이 빠졌다)
+        refs: list = []
+
+        def descend(node, depth=0):
+            for c in node.children:
+                refs.append(c)
+                if depth < 8:
+                    descend(c.resolve(ddoc), depth + 1)
+
+        descend(item)
+        used: set[str] = {c.cref for c in refs} | {c.cref for c in item.captions}
         graphics = [g.box for g in page.graphics if inside_ratio(g.box, expand(box, 2)) > 0.6]
         groups = cluster(graphics, gap=10) if graphics else []
         groups = [g for g in groups if (g[2] - g[0]) > 8 and (g[3] - g[1]) > 8]
@@ -1393,7 +1422,7 @@ class PdfParser:
 
         texts = []
         seen: set[str] = set()
-        for ref in list(item.children) + list(item.captions):
+        for ref in refs + list(item.captions):
             if ref.cref in seen:
                 continue
             seen.add(ref.cref)
@@ -1423,6 +1452,19 @@ class PdfParser:
                 home[1].append(t.text)
             else:
                 loose.append((t, tb))
+
+        if not self.ocr:
+            # Docling은 그림 안 글자의 일부만 그림의 자식으로 넣는다 (상자 모양 '개요' 그림에서 '○ 제목: …' 같은 줄이
+            # 자식에 없어 경고 없이 빠졌다). 텍스트 레이어가 있으면 그림 영역 안 글을 레이어에서 직접 읽고,
+            # 다른 블록(그림 밖으로 나간 캡션, 그림과 겹친 문단)이 담는 글자는 뺀다.
+            others = [self._box(t.prov[0], ddoc) for t in ddoc.texts
+                      if t.prov and t.prov[0].page_no == page.number and t.self_ref not in used]
+            others += [tb for _, tb in loose]
+            for k, (g, inner) in enumerate(figures):
+                layer = [ln.replace(AMBIGUOUS_GAP, " ").strip() for ln in page.text_lines(g, exclude=others)]
+                layer = [ln for ln in layer if ln]
+                if sum(len("".join(ln.split())) for ln in layer) > sum(len("".join(t.split())) for t in inner):
+                    figures[k] = (g, layer)
 
         out: list[tuple[float, Block]] = []
         for g, inner in figures:

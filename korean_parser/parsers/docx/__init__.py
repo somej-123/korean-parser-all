@@ -13,7 +13,7 @@ from lxml import etree
 
 from ...ir import (
     Anchor, Block, Break, Cell, Document, Drawing, Equation, Heading, ImageRef, Image, ListInfo, Meta, Note,
-    NoteRef, PageBreak, PageSetup, Paragraph, Provenance, Row, Shape, Tab, Table, Text,
+    NoteRef, PageBreak, PageSetup, Paragraph, Provenance, Row, Shape, Tab, Table, Text, inline_text, walk_blocks,
 )
 from .common import NS, child, emu_to_pt, hex_color, on_off, q, twips_to_pt, wattr
 from .omml import M as OMML
@@ -55,6 +55,8 @@ class DocxParser:
         self._block_seq = 0
         self._image_by_part: dict[str, str] = {}
         self._note_labels: dict[tuple[str, str], str] = {}
+        self._hf_seen: dict[str, set[str]] = {}  # 머리말·꼬리말 → 이미 담은 글
+        self._hf_parts: set[str] = set()  # 이미 읽은 머리말·꼬리말 부분
         self._part = "word/document.xml"
         self._rels: dict[str, tuple[str, str, bool]] = {}
         self._table_text: list[tuple[dict, dict]] = []  # 중첩 표마다 표 스타일의 (pPr, rPr)
@@ -85,6 +87,7 @@ class DocxParser:
 
         sect = child(body, "w:sectPr")
         self._read_section(sect)
+        self._read_other_headers(body)
         self._read_notes()
         comments = self._xml("word/comments.xml")
         if comments is not None and len(comments):
@@ -187,10 +190,40 @@ class DocxParser:
                 rel = self._rels.get(ref.get(f"{{{NS['r']}}}id"))
                 root = self._xml(rel[1]) if rel else None
                 if root is not None:
-                    saved = (self._part, self._rels)
-                    self._enter_part(rel[1])
-                    setattr(self.doc, kind, self._blocks(root))
-                    self._part, self._rels = saved
+                    blocks = self._header_part(rel[1], root)
+                    setattr(self.doc, kind, blocks)
+                    self._hf_seen[kind] = {_blocks_text(blocks)}
+                    self._hf_parts.add(rel[1])
+
+    def _header_part(self, part: str, root) -> list[Block]:
+        saved = (self._part, self._rels)
+        self._enter_part(part)
+        blocks = self._blocks(root)
+        self._part, self._rels = saved
+        return blocks
+
+    def _read_other_headers(self, body) -> None:
+        """다른 구역의 머리말·꼬리말과 첫 쪽·짝수 쪽 머리말·꼬리말도, 글이 다르면 화면용 것 뒤에 담는다.
+
+        화면은 이어진 한 쪽이라 머리말을 하나만 쓰지만, 나머지를 버리면 그 글이 경고 없이 빠진다
+        (PDF를 바꾼 DOCX는 쪽마다 구역과 머리말이 따로 있고, 장 제목·쪽 번호가 머리말 글상자에 들어 있다).
+        """
+        for sect in body.iter(q("w:sectPr")):
+            for kind in ("header", "footer"):
+                for ref in sect.findall(q(f"w:{kind}Reference")):
+                    rel = self._rels.get(ref.get(f"{{{NS['r']}}}id"))
+                    if not rel or rel[1] in self._hf_parts:
+                        continue
+                    self._hf_parts.add(rel[1])
+                    root = self._xml(rel[1])
+                    if root is None:
+                        continue
+                    blocks = self._header_part(rel[1], root)
+                    text = _blocks_text(blocks)
+                    seen = self._hf_seen.setdefault(kind, set())
+                    if text and text not in seen:
+                        seen.add(text)
+                        getattr(self.doc, kind).extend(blocks)
 
     def _read_notes(self) -> None:
         for kind, part in (("footnote", "word/footnotes.xml"), ("endnote", "word/endnotes.xml")):
@@ -519,26 +552,48 @@ class DocxParser:
         return Drawing(id=self._new_id(), prov=self._prov(), width_pt=w or 0, height_pt=h or 0, shapes=shapes, alt=alt)
 
     def _vml(self, pict, out, floats) -> None:
-        """구형 VML 그림/글상자 (w:pict, w:object)."""
-        for el in pict.iter():
-            if not isinstance(el.tag, str):
+        """구형 VML 그림/글상자 (w:pict, w:object).
+
+        한 w:pict의 v:group 안에 그림과 글상자가 여럿 들어 있을 수 있다 (PDF를 DOCX로 바꾼 문서에 흔하다).
+        그림은 모두 그림으로, 글상자는 모두 한 캔버스의 도형으로 담는다. 예전에는 첫 그림이나 첫 글상자만 읽어
+        나머지 글이 경고 없이 빠졌다. 글상자 안에 든 그림·글상자는 그 글상자를 읽을 때 담기므로 여기서는 뺀다.
+        """
+        txbx_tag = q("w:txbxContent")
+
+        def outer(el) -> bool:
+            for a in el.iterancestors():
+                if a is pict:
+                    return True
+                if a.tag == txbx_tag:
+                    return False
+            return True
+
+        for el in pict.iter(f"{{{NS['v']}}}imagedata"):
+            if not outer(el):
                 continue
-            if el.tag == f"{{{NS['v']}}}imagedata":
-                image_id = self._image_id(el.get(f"{{{NS['r']}}}id"))
-                if image_id:
-                    parent = el.getparent()
-                    w, h = _vml_size(parent.get("style", "") if parent is not None else "")
-                    out.append(ImageRef(image_id=image_id, width_pt=w, height_pt=h))
-                return
-        txbx = pict.find(f".//{q('w:txbxContent')}")
-        if txbx is not None:
+            image_id = self._image_id(el.get(f"{{{NS['r']}}}id"))
+            if image_id:
+                parent = el.getparent()
+                w, h = _vml_box(parent, pict)[2:] if parent is not None else (None, None)
+                out.append(ImageRef(image_id=image_id, width_pt=w, height_pt=h))
+        shapes = []
+        for txbx in pict.iter(txbx_tag):
+            if not outer(txbx):
+                continue
             shape_el = txbx.getparent().getparent() if txbx.getparent() is not None else None
-            w, h = _vml_size(shape_el.get("style", "") if shape_el is not None else "")
-            fill = hex_color((shape_el.get("fillcolor") or "").split()[0]) if shape_el is not None and shape_el.get("fillcolor") else None
-            shape = Shape(x=0, y=0, width=w or 200, height=h or 40, fill=fill, stroke="#000000",
-                          text_blocks=self._blocks(txbx), text_v_align="top")
-            floats.append((Drawing(id=self._new_id(), prov=self._prov(), width_pt=shape.width,
-                                   height_pt=shape.height, shapes=[shape]), 0.0, 0.0))
+            x, y, w, h = _vml_box(shape_el, pict) if shape_el is not None else (0.0, 0.0, None, None)
+            get = shape_el.get if shape_el is not None else (lambda *_: None)
+            fill = hex_color((get("fillcolor") or "").split()[0]) if get("fillcolor") and get("filled") != "f" else None
+            shapes.append(Shape(x=x, y=y, width=w or 200, height=h or 40, fill=fill,
+                                stroke=None if get("stroked") == "f" else "#000000",
+                                text_blocks=self._blocks(txbx), text_v_align="top"))
+        if shapes:
+            min_x, min_y = min(sh.x for sh in shapes), min(sh.y for sh in shapes)
+            for sh in shapes:
+                sh.x, sh.y = sh.x - min_x, sh.y - min_y
+            floats.append((Drawing(id=self._new_id(), prov=self._prov(),
+                                   width_pt=max(sh.x + sh.width for sh in shapes),
+                                   height_pt=max(sh.y + sh.height for sh in shapes), shapes=shapes), 0.0, 0.0))
 
     def _float_canvas(self, floats) -> Block:
         """한 문단에 떠 있는 개체들을 위치를 살려 하나의 캔버스로 합친다."""
@@ -744,6 +799,32 @@ def _vml_size(style: str) -> tuple[float | None, float | None]:
         (k.strip().lower(), v.strip()) for k, _, v in (p.partition(":") for p in style.split(";")) if k.strip()
     )
     return _css_len(props.get("width")), _css_len(props.get("height"))
+
+
+def _blocks_text(blocks) -> str:
+    return "".join(inline_text(b.inlines) for b in walk_blocks(blocks) if hasattr(b, "inlines")).strip()
+
+
+def _vml_box(el, stop) -> tuple[float, float, float | None, float | None]:
+    """VML 도형의 위치·크기(pt). v:group 안이면 left·top·width·height가 묶음 좌표(coordsize)라 묶음 크기로 바꾼다."""
+    me = dict((k.strip().lower(), v.strip()) for k, _, v in (p.partition(":") for p in (el.get("style") or "").split(";"))
+              if k.strip())
+    group = next((a for a in el.iterancestors() if a.tag == f"{{{NS['v']}}}group"), None)
+    if group is None or not any(a is stop for a in group.iterancestors()):
+        w, h = _vml_size(el.get("style", ""))
+        return 0.0, 0.0, w, h
+    gw, gh = _vml_size(group.get("style", ""))
+    cw, ch = (float(x or 1000) for x in ((group.get("coordsize") or "1000,1000").split(",") + ["1000"])[:2])
+    ox, oy = (float(x or 0) for x in ((group.get("coordorigin") or "0,0").split(",") + ["0"])[:2])
+    sx, sy = (gw or cw) / (cw or 1), (gh or ch) / (ch or 1)
+
+    def num(key):
+        m = re.match(r"-?[\d.]+", me.get(key, ""))
+        return float(m.group()) if m else None
+
+    left, top, w, h = num("left"), num("top"), num("width"), num("height")
+    return (((left or 0) - ox) * sx, ((top or 0) - oy) * sy,
+            w * sx if w is not None else None, h * sy if h is not None else None)
 
 
 def _css_len(v: str | None) -> float | None:
