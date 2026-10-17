@@ -50,7 +50,7 @@ KEPT_MIN = 0.99
 STRUCTURE = [
     ("pdf", "cer", None, "<=", 0.01), ("pdf", "eojeol_f1", None, ">=", 0.98), ("pdf", "table_teds", None, ">=", 0.95),
     ("pdf", "heading", "recall", ">=", 0.95), ("pdf", "reading_order", None, ">=", 0.99),
-    ("scan", "eojeol_f1", None, ">=", 0.88), ("scan", "table_teds", None, ">=", 0.85), ("scan", "cer", None, "<=", 0.15),
+    ("scan", "eojeol_f1", None, ">=", 0.94), ("scan", "table_teds", None, ">=", 0.92), ("scan", "cer", None, "<=", 0.02),
     ("docx (추정 제목 포함)", "heading", "recall", ">=", 0.95), ("docx", "table_teds", None, ">=", 1.0),
 ]
 HWPX_PREVIEW_MIN = 0.98
