@@ -12,3 +12,6 @@ samples_g2b/
 benchmarks/eval/data/
 benchmarks/eval/report.md
 samples_rfp/
+.venv-compare/
+benchmarks/compare/node_modules/
+benchmarks/compare/out/
