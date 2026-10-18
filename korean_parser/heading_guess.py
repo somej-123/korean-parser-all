@@ -17,6 +17,10 @@ DOCX·HWPX·HWP 문서는 제목 스타일·개요 번호 대신 '굵고 큰 번
 굵거나 크지 않아도 제목으로 보는 경우 (실제 문서 구조 정답, benchmarks/real_truth):
 - 점이 여러 개인 십진 번호('2.2 가스기술기준', '5.2.1 수소 튜브'): 규격서·지침의 절 번호다. 번호 자체가 제목의 표시다.
 - 번호 문단 바로 다음이 표('2. PM 주차구역 설치 현황' 다음에 표): 표 제목이다 (표지를 뺀 글 30자 이하).
+- 스타일 이름에 '제목'이 들어간 문단('내역사업 제목', '장 제목'): 문서를 만든 사람이 제목으로 정한 스타일이다. 개요 스타일이
+  아닌 사용자 정의 스타일이라 파서가 Heading으로 만들지 않는다. '표 제목'·'그림 제목'처럼 캡션 스타일과 목차 스타일은 뺀다.
+  같은 스타일은 같은 단계로 둔다 (스타일이 번호 모양보다 우선).
+하이픈 번호('2-1.', 'Ⅱ-1.')도 점 번호와 같은 절 번호로 본다.
 사용자 정의 영역 글자(한컴 기호 글꼴)로 시작하는 문단은, 같은 문서에 바로 앞·뒤 글자로 시작하는 문단이 있으면
 (❶ ❷ ❸처럼 차례로 이어지면) 번호로 본다. 보도자료 부록의 번호 제목이 이렇게 쓰여 후보에서 빠졌다.
 
@@ -39,7 +43,14 @@ _BULLET_KINDS = {"square", "circle", "dash", "dot"}  # 기호: 큰 글씨일 때
 _NEVER_KINDS = {"note"}  # ※ 참고
 _TOC_LINE = re.compile(r"(\t|\.{3,}|·{3,}|…|-{3,})\s*[\d#ivxIVX\-~ ]*\s*$")  # 목차 줄: "Ⅰ. 개요 ···· 3"
 _TITLE_TAIL = re.compile(r"([.。:;,]|[다음함임됨]\.?)$")  # 문장으로 끝나는 문단은 제목이 아니다
-_DECIMAL = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){1,3})\.?\s+(?=\D)")  # 2.2 / 5.2.1 / 6.7.10 (점이 여러 개인 절 번호)
+# 2.2 / 5.2.1 / 6.7.10 / 2-1. / Ⅱ-1. (점·하이픈으로 이은 절 번호)
+_DECIMAL = re.compile(r"^((?:\d{1,2}|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ])(?:[.\-]\d{1,2}){1,3})\.?\s+(?=\D)")
+_NOT_TITLE_STYLE = re.compile(r"표|그림|캡션|사진|도표|차례|목차|caption", re.I)
+
+
+def _title_style(name: str | None) -> bool:
+    """스타일 이름으로 본 제목 스타일 ('내역사업 제목'). 캡션·목차 스타일은 아니다."""
+    return bool(name) and "제목" in name and not _NOT_TITLE_STYLE.search(name)
 
 
 def _private_use(ch: str) -> bool:
@@ -97,6 +108,7 @@ class TitleFinder:
             self.kind_level.setdefault(p.outline.kind, p.outline.level)
         body = title_text(p)
         m = match_marker(body)
+        styled = _title_style(getattr(p, "style_name", None))
         if p.outline is not None:
             level, marker, kind = p.outline.level, p.outline.marker, p.outline.kind
         elif p.list_info is not None:
@@ -110,18 +122,23 @@ class TitleFinder:
                 kind = f"list:{p.list_info.list_id}:{p.list_info.level}" if p.list_info.ordered else "dot"
         elif m and m[0] in self.kind_level:  # 제목 상자(한 칸 표) 안의 "Ⅱ. 시스템 현황" 등
             level, marker, kind = self.kind_level[m[0]], m[1], m[0]
-        elif d := _DECIMAL.match(body):  # 2.2 가스기술기준
+        elif d := _DECIMAL.match(body):  # 2.2 가스기술기준, 2-1. 출자 예산
             marker = d.group(1)
-            level, kind = marker.count("."), f"decimal{marker.count('.') + 1}"
+            seps = len(re.findall(r"[.\-]", marker))
+            level, kind = seps, f"decimal{seps + 1}"
             m = (kind, marker, body[d.end():].strip())
         elif body and ord(body[0]) in self.pua_numbers and body[1:2].isspace():  # 한컴 기호 글꼴의 ❶ ❷ …
             level, marker, kind = 0, body[0], "pua_number"
             m = (kind, marker, body[1:].strip())
+        elif styled:
+            level, marker, kind = 0, "", ""
         else:
             return None
+        if styled:
+            kind = f"style:{p.style_name}"  # 같은 제목 스타일 = 같은 단계
         if kind in _NEVER_KINDS:
             return None
-        if kind != "pua_number" and (not marker.strip() or _private_use(body[:1])):
+        if kind != "pua_number" and not styled and (not marker.strip() or _private_use(body[:1])):
             kind = "dot"  # 보이는 번호가 없거나 기호 글꼴 문자(사용자 정의 영역)로 시작: 글머리 기호로 본다
         if _TOC_LINE.search(p.text):
             return None
@@ -138,10 +155,14 @@ class TitleFinder:
         ratio = 1.1 if kind in _BULLET_KINDS else 1.05
         bigger = bool(sizes and self.body_size and max(sizes) >= max(self.body_size * ratio, self.body_size + 0.9))
         decimal = kind.startswith("decimal")
+        if decimal and re.search(r"[.!?]\s", rest):
+            return None  # 절 번호 줄 안에 문장 경계가 있다: 번호 범위로 시작하는 문장 ('10-20 seconds to feel the pain. It …')
         table_title = before_table and kind not in _BULLET_KINDS and len(rest) <= 30
-        if not (bigger if kind in _BULLET_KINDS else bold or bigger or decimal or table_title):
+        if not (styled or (bigger if kind in _BULLET_KINDS else bold or bigger or decimal or table_title)):
             return None
-        why = [f"{'기호' if kind in _BULLET_KINDS else '번호'} '{marker}'"]
+        why = [f"스타일 '{p.style_name}'"] if styled else []
+        if marker.strip():
+            why.append(f"{'기호' if kind in _BULLET_KINDS else '번호'} '{marker}'")
         if decimal:
             why.append("절 번호")
         if table_title and not (bold or bigger or decimal):

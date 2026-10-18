@@ -84,3 +84,27 @@ def test_lone_private_use_bullet_is_still_a_bullet():
     # 같은 글자가 되풀이되는 기호(차례로 이어지지 않음)는 굵게만으로는 제목이 아니다
     out = dict(guesses([para(BODY), para(" 강조한 항목", 11, True), para(" 다른 항목", 11, True)]))
     assert out[" 강조한 항목"] is None
+
+
+def test_custom_title_styles_and_hyphen_numbers():
+    # 한글 사용자 정의 스타일('내역사업 제목')과 하이픈 번호('2-1.')로 쓴 제목 (처음 보는 문서 구조 정답에서 모든 파서가 놓침)
+    def styled(text, name, size=16):
+        p = para(text, size)
+        p.style_name = name
+        return p
+
+    out = dict(guesses([
+        styled("모태펀드 문화계정 현황", "내역사업 제목"), para(BODY),
+        styled("2-1. 모태펀드 문화계정 출자 예산", "내역사업 제목"), para(BODY),
+        styled("표 1 사업 예산", "표 제목", 10),  # 캡션 스타일은 제목이 아니다
+        para("Ⅱ-1. 추진 배경"),  # 스타일 없이도 하이픈 절 번호
+        styled("본 사업은 문화 산업을 지원한다.", "내역사업 제목"),  # 문장은 스타일이 제목이어도 아니다
+    ]))
+    assert out["모태펀드 문화계정 현황"] == out["2-1. 모태펀드 문화계정 출자 예산"] == 1  # 같은 스타일 = 같은 단계
+    assert out["표 1 사업 예산"] is None and out["본 사업은 문화 산업을 지원한다."] is None
+    assert out["Ⅱ-1. 추진 배경"] is not None
+
+
+def test_number_range_sentence_is_not_a_section_title():
+    out = dict(guesses([para(BODY), para("10-20 seconds to feel the pain. It is repeated")]))
+    assert out["10-20 seconds to feel the pain. It is repeated"] is None
