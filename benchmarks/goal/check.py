@@ -32,7 +32,7 @@ from lxml import etree  # noqa: E402
 
 from korean_parser.ir import walk_blocks  # noqa: E402
 from korean_parser.normalize import normalize_text  # noqa: E402
-from korean_parser.parsers import parse  # noqa: E402
+from korean_parser.parsers import detect_format, parse  # noqa: E402
 from korean_parser.parsers.pdf.page import _PDFIUM_LOCK  # noqa: E402  (Docling의 쪽 읽기 스레드와 pdfium을 나눠 쓴다)
 
 # 기준 문서 묶음 (docs/GOAL.md). 없는 폴더는 건너뛴다
@@ -106,9 +106,15 @@ def _pdf_pages(path: Path) -> list[list[str]] | None:
     return pages if sum(len(norm("".join(p))) for p in pages) >= 20 else None
 
 
+def _real_ext(path: Path) -> str:
+    """내용으로 본 형식 (확장자가 틀린 파일: '.hwpx'인 PDF). 파서와 같은 판단을 쓴다."""
+    fmt = detect_format(path)
+    return "." + fmt if fmt else path.suffix.lower()
+
+
 def source_pages(path: Path) -> list[list[str]] | None:
     """원문의 쪽마다 글 줄. 텍스트 레이어가 없는 PDF(스캔)는 None."""
-    ext = path.suffix.lower()
+    ext = _real_ext(path)
     if ext == ".pdf":
         with _PDFIUM_LOCK:
             return _pdf_pages(path)
@@ -204,7 +210,7 @@ def _hwp_texts(path: Path) -> list[str]:
 def edge_lines(path: Path) -> set[str]:
     """PDF 쪽의 위·아래 끝(높이의 12% 안)에 있는 줄 (norm). 파서는 두 쪽 이상에 나오는 이런 줄을 머리말·꼬리말로 보고
     글(숫자 빼고)마다 한 번만 남긴다."""
-    if path.suffix.lower() != ".pdf":
+    if _real_ext(path) != ".pdf":
         return set()
     import pypdfium2 as pdfium
 

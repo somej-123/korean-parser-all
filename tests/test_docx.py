@@ -226,3 +226,25 @@ def test_other_section_headers_are_kept(tmp_path):
            '<w:sectPr><w:headerReference w:type="default" r:id="h3"/></w:sectPr>'
     path = _docx(tmp_path, body, {"h1": _p("제1편"), "h2": _p("제2편"), "h3": _p("제3편"), "h4": _p("제1편")})
     assert [b.text for b in parse(path).header] == ["제3편", "제1편", "제2편"]
+
+
+def test_format_comes_from_content_not_extension(tmp_path):
+    # 공공데이터포털에 '.hwpx'로 올라간 PDF를 HWPX로 열다가 '손상된 파일'로 거절했다. 내용으로 형식을 정하고 경고를 남긴다
+    import shutil
+
+    from korean_parser.parsers import detect_format
+
+    src = Path(__file__).parent / "fixtures" / "korean_report.docx"
+    wrong = tmp_path / "report.hwpx"
+    shutil.copy(src, wrong)
+    assert detect_format(wrong) == "docx"
+    doc = parse(wrong)
+    assert doc.meta.source_format == "docx"
+    assert doc.warnings[0] == "확장자는 .hwpx이지만 내용은 DOCX라서 DOCX로 읽음"
+    fake_pdf = tmp_path / "notice.hwpx"
+    fake_pdf.write_bytes(b"\n%PDF-1.6\n%\xe2\xe3\xcf\xd3\n")
+    assert detect_format(fake_pdf) == "pdf"
+    # 내용으로 알 수 없으면 확장자를 따른다 (그다음 그 형식의 파서가 손상 여부를 알린다)
+    broken = tmp_path / "broken.docx"
+    broken.write_bytes(b"not a zip")
+    assert detect_format(broken) == "docx"

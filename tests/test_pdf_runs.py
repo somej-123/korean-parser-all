@@ -138,3 +138,14 @@ def test_high_quote_mark_stays_in_its_line_box():
     page = PageInfo(number=1, width=600, height=800, chars=chars)
     # 문단 상자 위쪽 끝(93)이 따옴표 잉크 상자(89.5~91.5)보다 아래에 있다
     assert "".join(page.text_lines((95.0, 93.0, 130.0, 101.0))) == "(’25"
+
+
+def test_glyph_outline_drawn_over_its_own_text_is_not_a_cover():
+    # 디자인 프로그램이 글자(❶)를 곡선으로 바꾼 사본을 바로 위에 겹쳐 그린다. 같은 자리·같은 색이면 덮개가 아니다
+    from korean_parser.parsers.pdf.page import _glyph_outline
+
+    char = (755.5, 105.0, 769.1, 118.6)
+    assert _glyph_outline(char, (35, 31, 32), (755.6, 105.2, 769.0, 118.5), (35, 31, 32))
+    # 흰 상자로 가린 글, 여러 글자를 덮는 큰 도형은 덮개다
+    assert not _glyph_outline(char, (35, 31, 32), (755.6, 105.2, 769.0, 118.5), (255, 255, 255))
+    assert not _glyph_outline(char, (0, 0, 0), (700.0, 100.0, 900.0, 130.0), (0, 0, 0))

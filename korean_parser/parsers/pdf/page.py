@@ -510,7 +510,7 @@ class PdfPages:
 
         # 그리는 순서(z-순서): 글자 위에 나중에 그려진 불투명 도형이 덮으면 원본에서는 안 보이는 글이다
         order: dict[int, int] = {}
-        occluders: list[tuple[int, BBox, object]] = []  # (그린 순서, 범위, 그림이면 그 개체)
+        occluders: list[tuple[int, BBox, object, tuple | None]] = []  # (그린 순서, 범위, 그림이면 그 개체, 도형 채우기 색)
         r, g, b, a = ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint(), ctypes.c_uint()
         for idx, obj in enumerate(page.get_objects(max_depth=1)):
             addr = ctypes.cast(obj.raw, ctypes.c_void_p).value
@@ -518,16 +518,18 @@ class PdfPages:
                 order[addr] = idx
                 continue
             opaque = obj.type == raw.FPDF_PAGEOBJ_IMAGE
+            fill = None
             if obj.type == raw.FPDF_PAGEOBJ_PATH:
                 mode, stroke = ctypes.c_int(), ctypes.c_int()
                 if raw.FPDFPath_GetDrawMode(obj.raw, ctypes.byref(mode), ctypes.byref(stroke)) and mode.value:
                     opaque = bool(raw.FPDFPageObj_GetFillColor(obj.raw, r, g, b, a)) and a.value >= 200
+                    fill = (r.value, g.value, b.value)
             if opaque:
                 vb = _visible_bounds(obj)
                 if vb is not None:
                     left, bottom, right, top = vb
                     image = obj if obj.type == raw.FPDF_PAGEOBJ_IMAGE else None
-                    occluders.append((idx, (left, h - top, right, h - bottom), image))
+                    occluders.append((idx, (left, h - top, right, h - bottom), image, fill))
 
         # 글자
         opaque_cache: dict[int, bool] = {}
@@ -565,10 +567,14 @@ class PdfPages:
             if mode == raw.FPDF_TEXTRENDERMODE_INVISIBLE:
                 continue  # 화면에 보이지 않는 글 (스캔본의 OCR 글자층, 템플릿의 숨은 글 등)
             z = order.get(ctypes.cast(obj, ctypes.c_void_p).value) if obj else None
+            text_fill = (r.value, g.value, b.value) if raw.FPDFText_GetFillColor(tp.raw, i, r, g, b, a) else None
             if z is not None:
                 cx, cy = (left + right) / 2, h - (bottom + top) / 2
+                box = (left, h - top, right, h - bottom)
                 if any(oz > z and ob[0] <= cx <= ob[2] and ob[1] <= cy <= ob[3]
-                       and (img is None or _opaque_image(img, opaque_cache)) for oz, ob, img in occluders):
+                       and (img is None or _opaque_image(img, opaque_cache))
+                       and not (img is None and _glyph_outline(box, text_fill, ob, fill))
+                       for oz, ob, img, fill in occluders):
                     continue  # 나중에 그려진 도형·불투명한 그림에 가려진 글
             if weight >= 600 or fname in self.heavy_fonts():
                 bold = True
@@ -611,6 +617,22 @@ class PdfPages:
         except Exception:  # noqa: BLE001
             info._bitmap = None
         return info
+
+
+def _glyph_outline(char_box: BBox, text_fill, path_box: BBox, path_fill) -> bool:
+    """글자 위에 그려진 도형이 덮개가 아니라 그 글자를 곡선으로 바꾼 사본인가.
+
+    디자인 프로그램은 글자 층을 남긴 채 같은 글자를 곡선으로 바꾼 도형을 바로 위에 겹쳐 그리기도 한다 (쇠고기 부위
+    안내도의 ❶ 39개 중 35개가 가려진 글로 버려졌다). 도형이 글자 상자와 거의 같은 자리·크기(겹침 비율 0.5 이상)이고
+    색이 같으면 그 글자의 모양이다. 글자를 가리는 흰 상자·지운 자리는 색이 다르거나 여러 글자를 덮어 크기가 다르다.
+    """
+    if text_fill is None or path_fill is None or max(abs(x - y) for x, y in zip(text_fill, path_fill)) > 24:
+        return False
+    inter = intersect(char_box, path_box)
+    if inter is None:
+        return False
+    union_area = area(char_box) + area(path_box) - area(inter)
+    return union_area > 0 and area(inter) / union_area >= 0.5
 
 
 def _opaque_image(obj, cache: dict[int, bool]) -> bool:

@@ -70,13 +70,20 @@ _PARSERS = {
 
 
 def detect_format(path: Path) -> str | None:
-    """확장자를 우선하되, 확장자가 없거나 틀린 경우 내용으로 판별한다."""
+    """내용으로 형식을 판별하고, 내용으로 알 수 없을 때만 확장자를 따른다.
+
+    확장자가 틀린 파일이 실제로 있다: 공공데이터포털에 '.hwpx'로 올라간 PDF 3개를 HWPX로 열다가 '손상된 파일'로
+    거절했다 (2026-10-18). 확장자를 먼저 믿으면 이런 파일을 읽지 못한다.
+    """
     ext = path.suffix.lower().lstrip(".")
-    if ext in _PARSERS:
-        return ext
+    found = _sniff(path)
+    return found or (ext if ext in _PARSERS else None)
+
+
+def _sniff(path: Path) -> str | None:
     try:
         with open(path, "rb") as f:
-            head = f.read(8)
+            head = f.read(1024)
     except OSError:
         return None
     if head.startswith(b"PK"):
@@ -93,7 +100,10 @@ def detect_format(path: Path) -> str | None:
             return "pptx"
         if "xl/workbook.xml" in names:
             return "xlsx"
-    if head.startswith(b"%PDF"):
+        if any(n.startswith("Contents/section") for n in names):
+            return "hwpx"  # content.hpf가 없는 HWPX (일부 변환 도구)
+        return None
+    if b"%PDF-" in head:  # PDF 머리는 앞 1024바이트 안 어디에 있어도 된다 (PDF 규격)
         return "pdf"
     return None
 
@@ -126,6 +136,7 @@ def parse(path: str | Path, korean: bool = True, convert_images: bool = True) ->
         fmt = "hwp"
     else:
         fmt = detect_format(path)
+    ext = path.suffix.lower().lstrip(".")
     if fmt not in _PARSERS:
         raise DocumentError(
             f"{path.name}: 지원하지 않는 형식입니다 (감지: {fmt or '알 수 없음'}, 지원: {', '.join(supported_formats())})"
@@ -134,6 +145,8 @@ def parse(path: str | Path, korean: bool = True, convert_images: bool = True) ->
         doc = _PARSERS[fmt](path)
     except zipfile.BadZipFile as exc:
         raise DocumentError(f"{path.name}: 손상된 파일입니다 ({exc})") from exc
+    if ext in _PARSERS and ext != fmt:
+        doc.warnings.insert(0, f"확장자는 .{ext}이지만 내용은 {fmt.upper()}라서 {fmt.upper()}로 읽음")
     _stamp_source(doc, path)
     if convert_images:
         from ..images import convert_unrenderable
