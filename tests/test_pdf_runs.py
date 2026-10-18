@@ -210,6 +210,42 @@ def test_bullet_lines_and_table_titles_are_not_titles():
     assert kinds[2] == ("Heading", "< 추진 배경 >") and kinds[5] == ("Heading", "< 붙임 >")  # 표 앞이 아니면 그대로
 
 
+def test_signature_lines_at_page_end_are_not_titles():
+    # 공고문 끝의 발신 기관·직위 줄 (한남대 공고서 8쪽: 날짜 줄 뒤 '… 계약담당관', 2쪽: 로고 그림 옆 '…(운영지원팀)').
+    # 쪽의 마지막 글일 때만 되돌린다. 문서 중간의 제목은 번호가 있거나 뒤에 본문이 온다
+    from korean_parser.ir import Document, Figure, Heading, PageBreak, Paragraph, Provenance, Text
+    from korean_parser.parsers.pdf import PdfParser, _signature_line
+
+    for text in ["한남대학교 산학협력단 계약담당관", "한국가스공사 사장", "부산광역시장", "한남대학교 산학협력단(운영지원팀)",
+                 "조달청장 (직인)"]:
+        assert _signature_line(text), text
+    for text in ["2. 계약담당관 업무", "1 입찰개요", "계약담당관 업무", "(협상에 의한 계약)"]:
+        assert not _signature_line(text), text
+
+    def at(page):
+        return Provenance(parser="t", page=page, bbox=(100, 600, 500, 620))
+
+    def h(i, text, page):
+        return Heading(id=f"h{i}", level=1, prov=at(page), inlines=[Text(text=text)])
+
+    def p(i, text, page):
+        return Paragraph(id=f"p{i}", prov=at(page), inlines=[Text(text=text)])
+
+    parser = PdfParser.__new__(PdfParser)
+    parser.doc = Document()
+    parser.doc.blocks = [
+        h(1, "청렴계약 이행 서약서", 1), p(1, "본문", 1), Figure(id="f1", image_id="i1", prov=at(1)), h(2, "한남대학교 산학협력단(운영지원팀)", 1),
+        PageBreak(id="b2", prov=at(2)),
+        h(3, "한국가스공사 사장", 2), p(2, "가. 사장이 정한 기준에 따른다.", 2),  # 쪽 중간: 뒤에 본문
+        h(4, "부산광역시장", 2), PageBreak(id="b3", prov=at(3)),  # 쪽의 마지막 글
+        p(3, "2026년 9월 14일", 3), h(5, "한남대학교 산학협력단 계약담당관", 3), Figure(id="f2", image_id="i2", prov=at(3)),
+    ]
+    parser._demote_non_titles()
+    kinds = {b.id: type(b).__name__ for b in parser.doc.blocks}
+    assert kinds["h2"] == kinds["h4"] == kinds["h5"] == "Paragraph"
+    assert kinds["h1"] == kinds["h3"] == "Heading"
+
+
 def test_row_split_at_page_break_is_joined():
     # 쪽이 바뀌는 곳에서 나뉜 행: 다음 쪽 첫 행은 첫 칸이 비고 앞 행에 글이 있던 칸에만 남은 글이 있다 (법무부 현황 4곳,
     # TEDS 0.978). 세로 병합 칸이 쪽을 넘는 온전한 행(첫 칸만 빔)은 붙이지 않는다

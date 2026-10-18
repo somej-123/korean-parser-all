@@ -140,6 +140,40 @@ _BULLET_LINE = re.compile(r"^\s*[□○◦❍ㅇ※]\s")  # 개조식 항목 (�
 _BRACKET_LINE = re.compile(r"^\s*[<〈＜《]\s*[^<>〈〉＜＞《》]+[>〉＞》]\s*$")  # '< 측정 결과 >' 모양
 
 
+# 공고문·공문 끝의 발신 기관·직위 줄 ('한남대학교 산학협력단 계약담당관', '한국가스공사 사장', '○○대학교 산학협력단(운영지원팀)').
+# 직위 낱말이나 기관 이름으로 끝나고, 뒤에 괄호 한두 개('(운영지원팀)', '(직인)')가 붙을 수 있다
+_SIGNATURE = re.compile(
+    r"(담당관|관리관|이사장|사장|원장|청장|총장|시장|군수|구청장|위원장|대표이사|대표|단장|본부장|처장|국장|회장|소장|관장|"
+    r"학장|교육감|도지사|장관|귀하|대학교|산학협력단|공사|공단|재단|진흥원|위원회|연구원|협회|조합|주식회사)"
+    r"(\s*\([^()]{1,15}\)){0,2}\s*$")
+
+
+def _signature_line(text: str) -> bool:
+    """발신 기관·직위 줄 모양인가: 짧고, 번호가 없고, 직위 낱말이나 기관 이름으로 끝난다. 위치는 부르는 쪽이 본다."""
+    t = text.strip()
+    return len(t) <= 40 and match_marker(t) is None and _SIGNATURE.search(t) is not None
+
+
+def _ends_page(blocks, k: int) -> bool:
+    """k번째 블록이 그 쪽의 마지막 글인가. 뒤에 같은 쪽 블록이 있어도 그림(직인·로고), 날짜 줄, 다른 서명 줄이면 마지막으로 본다.
+
+    서명은 '날짜 → 기관 → 직위(직인)'처럼 여러 줄로 쓰기도 하고, 직인 그림이 글 옆이나 아래에 놓인다 (한남대 공고서 2쪽:
+    로고 그림과 '한남대학교 산학협력단(운영지원팀)'). 문서의 마지막 쪽만이 아니라 서약서처럼 중간에 끝나는 쪽도 같은 모양이다.
+    """
+    page = blocks[k].prov.page if blocks[k].prov else None
+    if page is None:
+        return False
+    for b in blocks[k + 1:]:
+        if not b.prov or b.prov.page != page:
+            return True
+        if isinstance(b, Figure):
+            continue
+        text = getattr(b, "text", "").strip()
+        if not (isinstance(b, (Heading, Paragraph)) and (_DATE_ONLY.match(text) or _signature_line(text))):
+            return False
+    return True
+
+
 def _not_a_title(text: str) -> bool:
     """제목으로 분류되었어도 제목이 아닌 줄: 날짜뿐인 줄, '- 다 음 -', 문장, 개조식 항목(□ ○ ㅇ ※)."""
     t = text.strip()
@@ -1147,6 +1181,9 @@ class PdfParser:
         날짜뿐인 줄('2026년 9월 14일'), 공문의 '- 다 음 -' 구분 줄, 문장으로 끝나는 줄('< 본 계약은 청렴계약(서약)제가
         적용됩니다 >', '□ … 다음과 같습니다.'). 큰 글씨라서 제목으로 분류되지만 제목은 문장이 아니다 (실제 문서 구조 정답:
         한남대 공고서 제목 정밀도 0.625).
+
+        쪽 끝의 발신 기관·직위 줄('한남대학교 산학협력단 계약담당관')도 되돌린다. 문서 중간의 진짜 제목('2. 계약담당관 업무')은
+        번호가 있고 뒤에 본문이 오므로, 그 쪽의 마지막 글(뒤에 직인 그림·날짜·다른 서명 줄만 있음)일 때만 본다.
         """
         demoted = set()
         blocks = self.doc.blocks
@@ -1155,7 +1192,8 @@ class PdfParser:
             # 보도자료 '< 생활제품 측정 결과 >'). 표 뒤의 줄은 다음 절 제목일 수 있어 그대로 둔다
             caption = (isinstance(b, Heading) and _BRACKET_LINE.match(b.text) is not None and k + 1 < len(blocks)
                        and isinstance(blocks[k + 1], (Table, Figure)))
-            if isinstance(b, Heading) and (_not_a_title(b.text) or caption):
+            signature = isinstance(b, Heading) and _signature_line(b.text) and _ends_page(blocks, k)
+            if isinstance(b, Heading) and (_not_a_title(b.text) or caption or signature):
                 self.doc.blocks[k] = Paragraph(id=b.id, prov=b.prov, inlines=b.inlines, style=b.style)
                 demoted.add(id(b))
         if demoted:
