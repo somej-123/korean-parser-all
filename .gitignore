@@ -15,3 +15,4 @@ samples_rfp/
 .venv-compare/
 benchmarks/compare/node_modules/
 benchmarks/compare/out/
+benchmarks/compare/out_new/
