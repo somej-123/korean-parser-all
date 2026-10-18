@@ -142,6 +142,12 @@ def source_pages(path: Path) -> list[list[str]] | None:
                     notes.extend(lines)
                 else:
                     out.append(lines)
+            # 슬라이드 메모(옛 p:cm/p:text, 새 p188:cm 글과 답글)도 한 쪽으로 모은다
+            for n in sorted(n for n in z.namelist() if re.match(r"ppt/comments/[^/]+\.xml$", n)):
+                root = etree.fromstring(z.read(n))
+                notes += [line for el in root.iter() if isinstance(el.tag, str) and etree.QName(el).localname == "text"
+                          for line in (el.text or "").splitlines()]
+                notes += ["".join(t.text or "" for t in p.iter(A + "t")) for p in root.iter(A + "p")]
             return out + ([notes] if notes else [])
         if ext == ".xlsx":
             shared = []

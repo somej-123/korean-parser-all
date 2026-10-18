@@ -24,6 +24,8 @@
   함께 넣는다. 도형 id는 슬라이드마다 1부터 다시 시작하므로 's슬라이드번호:id'로 바꾼다
 - 이어지지 않은 글 없는 도형(카드 배경, 색 띠, 아이콘 모양 등 장식)은 본문(흐름 배치)에 넣지 않는다 (경고)
 - 발표자 메모 → 슬라이드 끝에 문단 (style_name='slide_notes')
+- 슬라이드 메모(옛·새 형식, 답글) → Note(kind="comment"), 하이퍼링크 → Text.link, 수식(a14:m) → Equation,
+  OLE 개체 → 대신 보여 주는 그림. 숨긴 슬라이드도 읽고 경고에 쪽을 적는다
 - 날짜·슬라이드 번호 자리 표시자는 버리고, 바닥글(ftr)은 문서 꼬리말로
 - 문단 모양(줄 간격, 문단 앞뒤 간격, 왼쪽 여백·내어쓰기, 정렬)은 슬라이드에 적힌 값을 ParagraphStyle로
 
@@ -48,10 +50,11 @@ from pathlib import Path
 
 from ...ir import (
     LINE_GEOMETRIES, Block, Border, Borders, Break, Cell, Document, Drawing, Figure, FixedPage, Heading, HeadingGuess,
-    Image, ListInfo, Meta, PageBreak, PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Shape, Table, Text,
-    TextStyle, walk_blocks,
+    Equation, Image, ListInfo, Meta, Note, PageBreak, PageSetup, Paragraph, ParagraphStyle, Provenance, Row, Shape,
+    Table, Text, TextStyle, walk_blocks,
 )
 from ..docx.drawing import Theme, chart_ref, custom_path, read_chart, read_color, read_fill_line
+from ..docx.omml import omml_to_latex
 from ..ooxml import R_EMBED, R_ID, Package, ln
 
 PARSER_NAME = "pptx-native"
@@ -60,6 +63,9 @@ NS = {
     "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     "c": "http://schemas.openxmlformats.org/drawingml/2006/chart",
     "dgm": "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+    "a14": "http://schemas.microsoft.com/office/drawing/2010/main",
+    "m": "http://schemas.openxmlformats.org/officeDocument/2006/math",
+    "p188": "http://schemas.microsoft.com/office/powerpoint/2018/8/main",
 }
 EMU = 12700.0
 _TITLE = {"title", "ctrTitle"}
@@ -124,6 +130,8 @@ class PptxParser:
         self._xml_cache: dict[str, object] = {}
         self._table_styles: dict | None = None  # 표 스타일 id → a:tblStyle
         self._fixed_items: list[tuple[Shape, list[Block]]] = []  # 지금 슬라이드의 (도형, 그 자리 블록), z 순서
+        self._hidden_slides: list[int] = []  # 슬라이드 쇼에서 숨긴 슬라이드 번호 (읽기는 한다)
+        self._links: dict[str, dict[str, str]] = {}  # 부분 → 외부 관계(하이퍼링크) id → 주소
 
     def _new_id(self) -> str:
         self._seq += 1
@@ -160,6 +168,9 @@ class PptxParser:
             if n > 1:
                 self.doc.blocks.append(PageBreak(id=self._new_id(), prov=self._prov(n)))
             self.doc.blocks.extend(self._slide(part, n))
+        if self._hidden_slides:
+            # 숨긴 슬라이드도 파일에 있는 내용이라 넣는다. 쇼에서 안 보이는 것만 알린다
+            self._warn(f"숨긴 슬라이드도 넣음 ({', '.join(map(str, self._hidden_slides))}쪽)")
         self._move_repeated_text(len(slides))
         self._guess_slide_titles()
         self._finish_fixed_pages()
@@ -181,6 +192,8 @@ class PptxParser:
             self._warn(f"슬라이드 파일 없음: {part}")
             return []
         self._part = part
+        if root.get("show") in ("0", "false"):
+            self._hidden_slides.append(n)
         self._layout_boxes = self._placeholder_boxes(part)
         self._fixed_items = []
         tree = root.find(f"{q('p:cSld')}/{q('p:spTree')}")
@@ -200,6 +213,7 @@ class PptxParser:
         rest = [it for it in items if it[0][0] != 0]
         out = [b for _, blocks in titles + xy_order(rest) for b in blocks]
         out.extend(self._notes(part, n))
+        self._comments(part, n)
         # 고정 쪽: 배경과 마스터·레이아웃 도형은 슬라이드 도형을 다 읽은 뒤에 만든다 (그 그림이 본문 그림 번호를 밀지 않게)
         slide_items = self._fixed_items
         self._fixed_items = []
@@ -297,9 +311,13 @@ class PptxParser:
             return [(key, [fig])] if fig else []
         if name == "graphicFrame":
             blocks = self._frame(el, n, box)
-            self._place(el, xf, n, box, blocks, frame=True)
+            if len(blocks) == 1 and isinstance(blocks[0], Figure):  # OLE 개체의 그림
+                self._place(el, xf, n, box, blocks, image_id=blocks[0].image_id)
+            else:
+                self._place(el, xf, n, box, blocks, frame=True)
             return [(key, blocks)]
-        has_text = body is not None and any((t.text or "").strip() for t in body.iter(q("a:t")))
+        has_text = body is not None and (any((t.text or "").strip() for t in body.iter(q("a:t")))
+                                         or body.find(f".//{q('a14:m')}") is not None)  # 수식만 있는 글상자
         if not has_text:
             if name in ("sp", "cxnSp") and kind is None:
                 self._place(el, xf, n, box, [])
@@ -586,21 +604,49 @@ class PptxParser:
             text_v_align=_ANCHOR.get(bpr.get("anchor", "t") if bpr is not None else "t", "top"),
         )
 
-    def _paragraphs(self, body, n: int, box, bullets: bool, ids: bool = True) -> list[Paragraph]:
-        """글상자 문단들. ids=False면 블록 id를 붙이지 않는다 (본문에 넣지 않고 원래 배치 화면에만 그리는 글)."""
+    def _link(self, rpr, part: str | None) -> str | None:
+        """런의 하이퍼링크(a:hlinkClick) 주소. 슬라이드로 건너뛰는 링크처럼 꾸러미 안을 가리키면 없음."""
+        hl = rpr.find(q("a:hlinkClick")) if rpr is not None else None
+        if hl is None or not hl.get(R_ID):
+            return None
+        part = part or self._part
+        if part not in self._links:
+            self._links[part] = self.pkg.external(part)
+        return self._links[part].get(hl.get(R_ID)) or None
+
+    def _inlines(self, p, part: str | None) -> list:
+        inlines = []
+        for el in p:
+            name = ln(el)
+            if name in ("r", "fld"):
+                t = el.find(q("a:t"))
+                if t is not None and t.text:
+                    rpr = el.find(q("a:rPr"))
+                    inlines.append(Text(text=t.text, style=self._run_style(rpr), link=self._link(rpr, part)))
+            elif name == "br":
+                inlines.append(Break())
+            elif name == "AlternateContent":
+                # 수식(a14:m 안의 OMML)은 LaTeX로. 수식이 아닌 것은 Fallback(옛 프로그램용 글)을 읽는다
+                choice = next((c for c in el if ln(c) == "Choice"), None)
+                math = choice.find(f".//{q('a14:m')}") if choice is not None else None
+                if math is not None:
+                    for om in math.iter(q("m:oMath")):
+                        if om.getparent() is not None and ln(om.getparent()) in ("m", "oMathPara"):
+                            inlines.append(Equation(script=omml_to_latex(om), syntax="latex"))
+                else:
+                    fb = next((c for c in el if ln(c) == "Fallback"), None)
+                    if fb is not None:
+                        inlines.extend(self._inlines(fb, part))
+        return inlines
+
+    def _paragraphs(self, body, n: int, box, bullets: bool, ids: bool = True, part: str | None = None) -> list[Paragraph]:
+        """글상자 문단들. ids=False면 블록 id를 붙이지 않는다 (본문에 넣지 않고 원래 배치 화면에만 그리는 글).
+        part: 하이퍼링크 관계를 찾을 부분 (기본은 지금 슬라이드. 발표자 메모는 메모 부분)."""
         out: list[Paragraph] = []
         counters: dict[int, int] = {}
         for p in body.iter(q("a:p")):
-            inlines = []
-            for el in p:
-                name = ln(el)
-                if name in ("r", "fld"):
-                    t = el.find(q("a:t"))
-                    if t is not None and t.text:
-                        inlines.append(Text(text=t.text, style=self._run_style(el.find(q("a:rPr")))))
-                elif name == "br":
-                    inlines.append(Break())
-            if not any(isinstance(i, Text) and i.text.strip() for i in inlines):
+            inlines = self._inlines(p, part)
+            if not any(isinstance(i, Equation) or isinstance(i, Text) and i.text.strip() for i in inlines):
                 continue
             ppr = p.find(q("a:pPr"))
             level = int(ppr.get("lvl", "0")) if ppr is not None else 0
@@ -718,7 +764,14 @@ class PptxParser:
             texts = [t.text.strip() for t in root.iter(q("a:t")) if t.text and t.text.strip()]
             return [Paragraph(id=self._new_id(), prov=self._prov(n, box), inlines=[Text(text=t)],
                               list_info=ListInfo(level=0, marker="•", ordered=False)) for t in texts]
-        self._warn("읽지 못한 개체(OLE 등)가 있음 (PPTX)")
+        if uri.endswith("/ole"):
+            # 끼워 넣은 다른 파일(엑셀 표 등): 대신 보여 주는 그림(p:pic, 보통 mc:Fallback 안)을 넣는다
+            pic = next(data.iter(q("p:pic")), None)
+            fig = self._picture(pic, n, box) if pic is not None else None
+            self._warn("끼워 넣은 OLE 개체(다른 파일)는 그림으로만 넣음 (PPTX)" if fig else
+                       "끼워 넣은 OLE 개체(다른 파일)를 읽지 못함 (PPTX)")
+            return [fig] if fig else []
+        self._warn("읽지 못한 개체가 있음 (PPTX)")
         return []
 
     def _table(self, tbl, n: int, box) -> Table:
@@ -895,6 +948,33 @@ class PptxParser:
             self.doc.fixed_pages.append(page)
         self._fixed = []
 
+    def _comments(self, slide_part: str, n: int) -> None:
+        """슬라이드 메모 → Note(kind="comment"). 옛 메모(p:cm/p:text)와 새 메모(p188:cm, 답글 p188:reply)를 모두 읽는다.
+
+        메모는 슬라이드 위 위치에 붙고 본문 글자 자리가 없어서 NoteRef 없이 메모 목록에만 넣는다 (쪽은 prov.page).
+        """
+        parts = [t for t, kind in self.pkg.rels(slide_part).values() if kind == "comments"]
+        for part in parts:
+            root = self.pkg.xml(part)
+            if root is None:
+                continue
+            for cm in root.iter(q("p:cm"), q("p188:cm")):
+                blocks: list[Block] = []
+                if cm.tag == q("p:cm"):
+                    t = cm.find(q("p:text"))
+                    for line in (t.text or "").splitlines() if t is not None else []:
+                        if line.strip():
+                            blocks.append(Paragraph(id=self._new_id(), prov=self._prov(n), inlines=[Text(text=line)]))
+                else:
+                    bodies = [cm.find(q("p188:txBody"))] + list(cm.iter(q("p188:reply")))
+                    for b in bodies:
+                        body = b if b is None or b.tag == q("p188:txBody") else b.find(q("p188:txBody"))
+                        if body is not None:
+                            blocks.extend(self._paragraphs(body, n, None, bullets=False, part=part))
+                if blocks:
+                    k = sum(1 for x in self.doc.notes.values() if x.kind == "comment") + 1
+                    self.doc.notes[f"cm{k}"] = Note(kind="comment", label=f"메모{k}", blocks=blocks)
+
     def _notes(self, slide_part: str, n: int) -> list[Paragraph]:
         part = self.pkg.rel_of_type(slide_part, "notesSlide")
         root = self.pkg.xml(part) if part else None
@@ -908,7 +988,7 @@ class PptxParser:
             body = sp.find(q("p:txBody"))
             if body is None:
                 continue
-            for p in self._paragraphs(body, n, None, bullets=False):
+            for p in self._paragraphs(body, n, None, bullets=False, part=part):
                 p.style_name = "slide_notes"
                 out.append(p)
         return out

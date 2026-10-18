@@ -363,3 +363,88 @@ def test_xlsx_threaded_comments_win_and_no_cell_limit(tmp_path, monkeypatch):
     doc = parse(path)
     assert len(next(b for b in doc.blocks if isinstance(b, Table)).rows) == 10
     assert any("KP_XLSX_MAX_CELLS" in w for w in doc.warnings)
+
+
+def test_pptx_comments_hidden_slide_link_math_ole(tmp_path):
+    # PPTX 점검(v1.4.0)에서 찾은 것: 슬라이드 메모(옛·새 형식, 답글), 하이퍼링크 주소, 수식(a14:m), OLE 개체의
+    # 대신 그림이 모두 경고 없이 빠지거나 경고만 남았다. 숨긴 슬라이드는 읽되 알린다
+    import base64
+    import io
+    import re
+    import zipfile
+
+    from pptx import Presentation
+    from pptx.util import Pt
+
+    from korean_parser.ir import Equation, Figure, Text
+
+    prs = Presentation()
+    for i in range(2):
+        s = prs.slides.add_slide(prs.slide_layouts[5])
+        s.shapes.title.text = f"슬라이드 {i + 1}"
+        box = s.shapes.add_textbox(Pt(50), Pt(150), Pt(400), Pt(100)).text_frame
+        box.text = "누리집 안내"
+        box.paragraphs[0].runs[0].hyperlink.address = "https://example.go.kr/"
+    buf = io.BytesIO()
+    prs.save(buf)
+    out = tmp_path / "audit.pptx"
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4DwABAQEABRjYTgAAAABJRU5ErkJggg==")
+    ns = ('xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+          'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+          'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"')
+    math = ('<p:sp><p:nvSpPr><p:cNvPr id="90" name="수식"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm>'
+            '<a:off x="635000" y="3810000"/><a:ext cx="2540000" cy="635000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p>'
+            '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+            '<mc:Choice xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" Requires="a14"><a14:m>'
+            '<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:oMath><m:f><m:num><m:r>'
+            '<m:t>a</m:t></m:r></m:num><m:den><m:r><m:t>b</m:t></m:r></m:den></m:f></m:oMath></m:oMathPara></a14:m>'
+            '</mc:Choice><mc:Fallback><a:r><a:t> </a:t></a:r></mc:Fallback></mc:AlternateContent></a:p></p:txBody></p:sp>')
+    ole = ('<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="91" name="개체"/><p:cNvGraphicFramePr/><p:nvPr/>'
+           '</p:nvGraphicFramePr><p:xfrm><a:off x="635000" y="4445000"/><a:ext cx="2540000" cy="1270000"/></p:xfrm>'
+           '<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole">'
+           '<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006">'
+           '<mc:Choice Requires="v"><p:oleObj r:id="rIdOle" progId="Excel.Sheet.12"><p:embed/></p:oleObj></mc:Choice>'
+           '<mc:Fallback><p:oleObj r:id="rIdOle" progId="Excel.Sheet.12"><p:embed/><p:pic><p:nvPicPr><p:cNvPr id="2" '
+           'name="개체 그림"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rIdOleImg"/></p:blipFill>'
+           '<p:spPr/></p:pic></p:oleObj></mc:Fallback></mc:AlternateContent></a:graphicData></a:graphic></p:graphicFrame>')
+    with zipfile.ZipFile(buf) as zin, zipfile.ZipFile(out, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "ppt/slides/slide2.xml":
+                xml = re.sub(r"<p:sld\b", '<p:sld show="0"', data.decode("utf-8"), count=1)
+                data = xml.replace("</p:spTree>", math + ole + "</p:spTree>").encode("utf-8")
+            elif item.filename == "ppt/slides/_rels/slide1.xml.rels":
+                data = data.replace(b"</Relationships>", b'<Relationship Id="rIdCm" Type="http://schemas.openxmlformats.org'
+                                    b'/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/>'
+                                    b"</Relationships>")
+            elif item.filename == "ppt/slides/_rels/slide2.xml.rels":
+                data = data.replace(b"</Relationships>", b'<Relationship Id="rIdCm2" Type="http://schemas.microsoft.com/'
+                                    b'office/2018/10/relationships/comments" Target="../comments/modernComment_1.xml"/>'
+                                    b'<Relationship Id="rIdOle" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+                                    b'relationships/package" Target="../embeddings/sheet1.xlsx"/>'
+                                    b'<Relationship Id="rIdOleImg" Type="http://schemas.openxmlformats.org/officeDocument/'
+                                    b'2006/relationships/image" Target="../media/ole1.png"/></Relationships>')
+            zout.writestr(item, data)
+        zout.writestr("ppt/comments/comment1.xml",
+                      f'<p:cmLst {ns}><p:cm authorId="0" idx="1"><p:pos x="10" y="10"/><p:text>옛 메모 글</p:text></p:cm>'
+                      "</p:cmLst>")
+        body = '<p188:txBody><a:bodyPr/><a:p><a:r><a:t>{}</a:t></a:r></a:p></p188:txBody>'
+        zout.writestr("ppt/comments/modernComment_1.xml",
+                      f'<p188:cmLst {ns} xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main">'
+                      '<p188:cm id="{1}" authorId="{2}"><p188:replyLst><p188:reply id="{3}" authorId="{2}">'
+                      + body.format("답글") + "</p188:reply></p188:replyLst>" + body.format("새 메모 글")
+                      + "</p188:cm></p188:cmLst>")
+        zout.writestr("ppt/embeddings/sheet1.xlsx", b"")
+        zout.writestr("ppt/media/ole1.png", png)
+    doc = parse(out)
+    texts = [i for b in doc.iter_blocks() for i in getattr(b, "inlines", []) if isinstance(i, Text)]
+    assert any(t.text == "누리집 안내" and t.link == "https://example.go.kr/" for t in texts)
+    memos = [[p.text for p in n.blocks] for n in doc.notes.values() if n.kind == "comment"]
+    assert memos == [["옛 메모 글"], ["새 메모 글", "답글"]]
+    assert [n.blocks[0].prov.page for n in doc.notes.values()] == [1, 2]
+    eqs = [i for b in doc.iter_blocks() for i in getattr(b, "inlines", []) if isinstance(i, Equation)]
+    assert eqs and "frac" in eqs[0].script
+    figs = [b for b in doc.iter_blocks() if isinstance(b, Figure)]
+    assert figs and figs[0].prov.page == 2
+    assert "숨긴 슬라이드도 넣음 (2쪽)" in doc.warnings
+    assert "끼워 넣은 OLE 개체(다른 파일)는 그림으로만 넣음 (PPTX)" in doc.warnings

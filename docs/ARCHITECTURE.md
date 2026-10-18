@@ -271,6 +271,11 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
   실제 PPTX 세 개의 글 없는 도형은 모두 장식이었다.
   (2) 제목 자리 표시자가 없는 슬라이드는 위쪽 40% 안의 가장 큰 글씨(본문 중앙값의 1.25배 이상, 60자 이하) 글상자에
   `heading_guess`(1단계)를 붙인다. (3) 대체 텍스트가 파일 경로이면 파일 이름만 남긴다.
+- PPTX 점검(v1.4)에서 고친 것: 슬라이드 메모(옛 ppt/comments/comment*.xml의 p:text, 새 modernComment의 p188:cm 글과
+  답글)는 Note(kind="comment"). 글자 자리가 없어 NoteRef 없이 메모 목록에만 넣고 쪽은 prov.page. 런 하이퍼링크(a:hlinkClick,
+  외부 주소만) → Text.link. 수식(a:p 안 mc:AlternateContent의 a14:m) → Equation(LaTeX), 수식만 있는 글상자도 읽는다.
+  OLE 개체(graphicData …/ole)는 대신 보여 주는 그림(보통 mc:Fallback 안 p:pic)을 Figure로 넣고 경고한다 (실제 철도 교재 1곳).
+  숨긴 슬라이드(p:sld show="0")도 읽고 쪽 번호를 경고에 적는다. 실제 표본 28개에는 메모·숨긴 슬라이드·수식이 없었다.
 - 원래 배치 화면(고정 쪽, v0.14): 슬라이드마다 `FixedPage` 하나에 도형을 원본 그리는 차례(spTree 순서)대로 담는다.
   맨 아래에 마스터·레이아웃의 자리 표시자 아닌 도형(로고, 색 띠. `showMasterSp="0"`이면 뺀다), 그 위에 슬라이드 도형.
   배경색은 슬라이드 → 레이아웃 → 마스터의 `p:bg` (테마 배경 참조 `bgRef`는 안에 적힌 색). 흐름 배치에서 빼는 장식 도형
