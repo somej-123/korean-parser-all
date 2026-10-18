@@ -22,7 +22,7 @@ from ...ir import (
     Anchor, Block, Break, Cell, Document, Drawing, Equation, Heading, ImageRef, Image, ListInfo, Meta,
     Note, NoteRef, PageBreak, PageSetup, Paragraph, Provenance, Row, Tab, Table, Text, TextStyle, walk_blocks,
 )
-from .header import Counters, Header, color, hwp_pt, kid, kids, ln, shape_comment
+from .header import Counters, Header, color, format_hwp_number, hwp_pt, kid, kids, ln, shape_comment
 from ..docx.symbols import map_symbol
 from .shapes import DRAWING_TAGS, ShapeReader
 
@@ -97,14 +97,28 @@ class HwpxParser:
                 self._warn(f"섹션 파일 없음: {part}")
                 continue
             self.doc.blocks.extend(self._paragraphs(root))
-        # 바탕쪽(Contents/masterpageN.xml)은 아직 읽지 않는다. 글이 있으면 알린다 (기준 문서 묶음의 바탕쪽은 모두 글이 없었다)
-        for name in getattr(self, "names", []):
-            if re.match(r"Contents/masterpage\d+\.xml$", name):
-                root = self._xml(name)
-                if root is not None and any((t.text or "").strip() for t in root.iter() if ln(t) == "t"):
-                    self._warn("바탕쪽의 글은 넣지 않음")
+        # 바탕쪽(Contents/masterpageN.xml): 쪽마다 되풀이되는 글이라 머리말 뒤에 담는다 (같은 글은 한 번)
+        pages = [n for n in getattr(self, "names", []) if re.match(r"Contents/masterpage\d+\.xml$", n)]
+        for name in sorted(pages, key=lambda n: int(re.sub(r"\D", "", n))):
+            sub = kid(self._xml(name), "subList")
+            if sub is not None:
+                self._master_page(sub)
         self.zip.close()
         return self.doc
+
+    def _master_page(self, sub) -> None:
+        """바탕쪽의 글 → 머리말 뒤 (style_name='master_page'). 쪽마다 되풀이되는 글이라 본문에는 넣지 않는다.
+        v1.0에서는 읽지 않고 경고만 남겼다. 글이 없는 바탕쪽(쪽 테두리 선, 그림만)은 넣지 않는다."""
+        blocks = self._paragraphs(sub)
+        text = " ".join(b.text for b in walk_blocks(blocks) if isinstance(b, (Paragraph, Heading))).strip()
+        seen = self._hf_seen.setdefault("header", set())
+        if not text or text in seen:
+            return
+        seen.add(text)
+        for b in blocks:
+            if isinstance(b, Paragraph):
+                b.style_name = "master_page"
+        self.doc.header.extend(blocks)
 
     def _xml(self, name: str):
         if name not in self.names:
@@ -250,7 +264,7 @@ class HwpxParser:
             elif name == "secPr":
                 self._section(el)
             elif name == "ctrl":
-                self._ctrl(el, inlines, state)
+                self._ctrl(el, inlines, state, style)
             elif name == "tbl":
                 after.append(self._table(el))
                 self._caption(el, after)
@@ -337,7 +351,7 @@ class HwpxParser:
                 state["deleted"] = False
             add(c.tail)
 
-    def _ctrl(self, ctrl, inlines, state) -> None:
+    def _ctrl(self, ctrl, inlines, state, style=None) -> None:
         for c in ctrl:
             name = ln(c)
             if name == "fieldBegin" and c.get("type") == "HYPERLINK":
@@ -354,6 +368,30 @@ class HwpxParser:
                     key, label = f"cm{k}", f"메모{k}"
                     self.doc.notes[key] = Note(kind="comment", label=label, blocks=blocks)
                     inlines.append(NoteRef(note_id=key, label=label))
+            elif name == "hiddenComment":
+                # 숨은 설명: 인쇄되지 않는 설명 글. 메모처럼 Note(kind="comment")와 붙은 자리의 NoteRef (v1.0에서는 경고만)
+                sub = kid(c, "subList")
+                blocks = self._paragraphs(sub) if sub is not None else []
+                if any(b.text.strip() for b in walk_blocks(blocks) if isinstance(b, (Paragraph, Heading))):
+                    k = sum(1 for key in self.doc.notes if key.startswith("hc")) + 1
+                    key, label = f"hc{k}", f"숨은 설명{k}"
+                    self.doc.notes[key] = Note(kind="comment", label=label, blocks=blocks)
+                    inlines.append(NoteRef(note_id=key, label=label))
+            elif name == "autoNum" and c.get("numType") in ("PICTURE", "TABLE", "EQUATION"):
+                # 캡션의 자동 번호 ('그림 1'의 1). 글이 아니라 컨트롤이라 예전에는 번호가 빠졌다 (hwpxlib SimpleRectangle).
+                # 쪽 번호·각주 번호는 넣지 않는다 (쪽마다 다른 값, 각주 번호는 NoteRef 이름표)
+                fmt = kid(c, "autoNumFormat")
+                kind = fmt.get("type", "DIGIT") if fmt is not None else "DIGIT"
+                try:
+                    num = int(c.get("num", "0"))
+                except ValueError:
+                    num = 0
+                user = (fmt.get("userChar") or "") if fmt is not None else ""
+                body = user if kind == "USER_CHAR" and user else format_hwp_number(num, kind) if num > 0 else ""
+                if body:
+                    pre, suf = ((fmt.get("prefixChar") or "", fmt.get("suffixChar") or "") if fmt is not None
+                                else ("", ""))
+                    inlines.append(Text(text=f"{pre}{body}{suf}", style=style, link=state["link"]))
             elif name == "fieldEnd":
                 state["link"] = None
             elif name in ("header", "footer"):
@@ -382,6 +420,10 @@ class HwpxParser:
 
     def _section(self, sec) -> None:
         self._outline_ref = sec.get("outlineShapeIDRef", self._outline_ref) or self._outline_ref
+        for mp in kids(sec, "masterPage"):  # HWP 바이너리에서 옮긴 바탕쪽 (HWPX는 idRef만 있고 글은 따로 된 파일)
+            sub = kid(mp, "subList")
+            if sub is not None:
+                self._master_page(sub)
         if self._page_set:
             return
         page = kid(sec, "pagePr")

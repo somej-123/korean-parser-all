@@ -129,7 +129,7 @@ def test_real_rfp_example():
 def test_caption_memo_and_master_page(tmp_path):
     # v1.0 기준 1(빠짐없이)에서 찾은 것: 개체 캡션 글은 개체 안이 아니라 hp:caption에 있어 경고 없이 빠졌고
     # (hwpxlib SimpleRectangle '그림'), 메모(fieldBegin MEMO)와 바탕쪽의 글도 알리지 않고 빠졌다.
-    # 캡션은 개체 뒤 문단으로 읽고, 바탕쪽은 읽지 않는 대신 경고를 남긴다 (메모는 v1.4.0부터 읽는다)
+    # 캡션은 개체 뒤 문단으로 읽는다. 메모는 v1.4.0부터 메모 목록으로, 바탕쪽 글은 v1.4.1부터 머리말 뒤로 읽는다
     import re
     import zipfile
 
@@ -155,7 +155,8 @@ def test_caption_memo_and_master_page(tmp_path):
     doc = parse(out)
     i = next(k for k, b in enumerate(doc.blocks) if isinstance(b, Table))
     assert doc.blocks[i + 1].text == "표 1. 시험 표"
-    assert "바탕쪽의 글은 넣지 않음" in doc.warnings
+    assert [(b.style_name, b.text) for b in doc.header] == [("master_page", "바탕쪽 글")]
+    assert not any("바탕쪽" in w for w in doc.warnings)
     # 메모는 v1.4.0부터 읽는다: Note(kind="comment")와 붙은 자리의 NoteRef
     assert [n.blocks[0].text for n in doc.notes.values() if n.kind == "comment"] == ["메모 글"]
 
@@ -191,3 +192,41 @@ def test_hwpx_memo_becomes_comment_note():
     memos = [n for n in doc.notes.values() if n.kind == "comment"]
     assert len(memos) == 56 and memos[0].blocks[0].text.startswith("★교과군명")
     assert not any("메모" in w for w in doc.warnings)
+
+
+def test_hidden_comment_and_caption_auto_number(tmp_path):
+    # HWP·HWPX 점검(v1.4.1)에서 찾은 것: 캡션 '그림 1'의 번호는 글이 아니라 자동 번호 컨트롤(hp:autoNum)이라 '그림 '만
+    # 남았고, 숨은 설명(hp:hiddenComment)의 글은 경고 없이 빠졌다
+    import zipfile
+
+    out = tmp_path / "autonum.hwpx"
+    hidden = ('<hp:ctrl><hp:hiddenComment><hp:subList><hp:p><hp:run><hp:t>숨은 글</hp:t></hp:run></hp:p></hp:subList>'
+              '</hp:hiddenComment></hp:ctrl>')
+    num = ('<hp:t>표 </hp:t><hp:ctrl><hp:autoNum num="3" numType="TABLE"><hp:autoNumFormat type="ROMAN_CAPITAL" '
+           'userChar="" prefixChar="" suffixChar="." supscript="0"/></hp:autoNum></hp:ctrl>'
+           '<hp:ctrl><hp:autoNum num="7" numType="PAGE"><hp:autoNumFormat type="DIGIT"/></hp:autoNum></hp:ctrl>')
+    with zipfile.ZipFile(FIX / "simple_table.hwpx") as zin, zipfile.ZipFile(out, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "Contents/section0.xml":
+                data = data.decode("utf-8").replace("<hp:t>", hidden + num + "<hp:t>", 1).encode("utf-8")
+            zout.writestr(item, data)
+    doc = parse(out)
+    assert any(b.text.startswith("표 III.") for b in blocks_of(doc, Paragraph))  # 쪽 번호(PAGE)는 넣지 않는다
+    assert [(k, n.label, n.blocks[0].text) for k, n in doc.notes.items()] == [("hc1", "숨은 설명1", "숨은 글")]
+
+
+@pytest.mark.parametrize("name,check", [
+    ("basic_바탕쪽.hwp", lambda d: [b.style_name for b in d.header] == ["master_page"] and d.header[0].text),
+    ("basic_숨은설명.hwp", lambda d: [b.text for n in d.notes.values() for b in n.blocks]
+     == ["우리는 우리다.", "그것은 그것이다."]),
+    ("basic_표.hwp", lambda d: any(getattr(b, "text", "").startswith("표 1") for b in d.iter_blocks())),
+])
+def test_hwp_master_page_hidden_comment_auto_number(name, check):
+    # HWP 바이너리: 바탕쪽(구역 정의 아래 글 목록), 숨은 설명(tcmt), 자동 번호(atno)를 HWPX와 같은 모양으로 옮긴다
+    sample = Path(__file__).resolve().parents[1] / "benchmarks/corpus/samples_web/hwplib" / name
+    if not sample.exists():
+        pytest.skip("hwplib 표본이 없다 (benchmarks/corpus/fetch_samples.sh)")
+    doc = parse(sample)
+    assert check(doc)
+    assert not any("바탕쪽" in w or "숨은 설명" in w for w in doc.warnings)

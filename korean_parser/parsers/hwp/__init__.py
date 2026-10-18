@@ -507,9 +507,19 @@ class _Body:
             _sub(el, "mainText").text = main
             _sub(el, "subText").text = sub
         elif cid == "tcmt":
-            # 숨은 설명: 인쇄되지 않는 설명 글. v1.0에서는 읽지 않고 알린다 (docs/GOAL.md)
-            if _has_text(ctrl.kids(Tag.PARA_HEADER)):
-                self.warn("숨은 설명의 글은 넣지 않음")
+            # 숨은 설명: 인쇄되지 않는 설명 글 → HWPX의 hiddenComment (메모처럼 읽는다. v1.0에서는 경고만)
+            self._sublist(_sub(_sub(run, "ctrl"), "hiddenComment"), ctrl)
+        elif cid == "atno":
+            # 자동 번호 (캡션의 '그림 1'의 1 등): 속성(번호 종류 0~3비트, 번호 모양 4~11비트), 번호, 사용자 기호,
+            # 앞·뒤 장식 문자 (각 WCHAR) → HWPX의 autoNum
+            rd = Reader(ctrl.data, 4)
+            attr, num = rd.u32(), rd.u16()
+            user, prefix, suffix = (chr(rd.u16()).strip("\0") for _ in range(3))
+            kinds = ("PAGE", "FOOTNOTE", "ENDNOTE", "PICTURE", "TABLE", "EQUATION")
+            fmt = (attr >> 4) & 0xFF
+            el = _sub(_sub(run, "ctrl"), "autoNum", num=num, numType=kinds[attr & 0xF] if attr & 0xF < 6 else "PAGE")
+            _sub(el, "autoNumFormat", type=_NUM_FORMAT[fmt] if fmt < len(_NUM_FORMAT) else "DIGIT", userChar=user,
+                 prefixChar=prefix, suffixChar=suffix)
         elif cid in ("head", "foot"):
             rd = Reader(ctrl.data, 4)
             kind = "header" if cid == "head" else "footer"
@@ -547,9 +557,17 @@ class _Body:
             attr = pr.u32()
             pp = _sub(sec, "pagePr", width=w, height=h, landscape="NARROWLY" if attr & 0x1 else "WIDELY")
             _sub(pp, "margin", left=left, right=right, top=top, bottom=bottom, header=header, footer=footer)
-        if _has_text(ctrl.kids(Tag.PARA_HEADER)):
-            # 구역 정의 아래 LIST_HEADER + 문단 = 바탕쪽. 아직 읽지 않고 알린다 (HWPX의 masterpage와 같다)
-            self.warn("바탕쪽의 글은 넣지 않음")
+        # 구역 정의 아래 LIST_HEADER + 문단 = 바탕쪽 (양쪽·홀수·짝수 쪽마다 LIST_HEADER 하나). HWPX의 masterpage처럼
+        # secPr 안 masterPage/subList로 옮긴다 (v1.0에서는 경고만 남겼다)
+        groups: list[list[Record]] = []
+        for r in ctrl.children:
+            if r.tag == Tag.LIST_HEADER:
+                groups.append([])
+            elif r.tag == Tag.PARA_HEADER and groups:
+                groups[-1].append(r)
+        for g in groups:
+            if _has_text(g):
+                self._paragraphs(_sub(_sub(sec, "masterPage"), "subList"), g)
         for i, pbf in enumerate(ctrl.kids(Tag.PAGE_BORDER_FILL)[:3]):
             br = Reader(pbf.data)
             br.u32()

@@ -127,7 +127,7 @@ def source_pages(path: Path) -> list[list[str]] | None:
             names = [n for n in z.namelist() if re.match(r"word/(document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml$", n)]
             return [[t for n in names for t in _xml_texts(z, n, W + "t", skip_fallback=True)]]
         if ext == ".hwpx":
-            names = sorted(n for n in z.namelist() if re.match(r"Contents/section\d+\.xml$", n))
+            names = sorted(n for n in z.namelist() if re.match(r"Contents/(section|masterpage)\d+\.xml$", n))
             hp = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
             return [[t for n in names for t in _xml_texts(z, n, hp + "t")]]
         if ext == ".pptx":
@@ -213,10 +213,8 @@ def _hwp_texts(path: Path) -> list[str]:
 
     def walk(records, parent=None):
         for r in records:
-            # 경고만 남기는 곳은 뺀다: 바탕쪽(구역 정의 아래 문단), 숨은 설명, 문단 바로 아래 달린 글 목록
-            if r.tag == Tag.PARA_HEADER and parent is not None and (
-                    parent.tag == Tag.PARA_HEADER
-                    or parent.tag == Tag.CTRL_HEADER and ctrl_id(parent.data) in ("secd", "tcmt")):
+            # 경고만 남기는 곳은 뺀다: 문단 바로 아래 달린 글 목록 (바탕쪽·숨은 설명은 v1.4부터 읽는다)
+            if r.tag == Tag.PARA_HEADER and parent is not None and parent.tag == Tag.PARA_HEADER:
                 continue
             if r.tag == Tag.PARA_TEXT:
                 chars, i, buf = r.data.decode("utf-16-le", "replace"), 0, []

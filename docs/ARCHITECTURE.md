@@ -116,8 +116,10 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
   행 이름 + 값. 모든 행이 열 수만큼 값을 가질 때만 Chart(chart_type='unknown')로, 아니면 'OLE 개체는 표시하지 않음'.
 - 개체 캡션: 컨트롤 바로 아래, 개체 레코드(SHAPE_COMPONENT·EQEDIT·TABLE)보다 앞의 LIST_HEADER(캡션 속성 0~1비트 방향) +
   형제 문단 → hp:caption. 표는 TABLE 레코드 앞의 LIST_HEADER가 캡션이고 뒤가 칸이다.
-- 바탕쪽(구역 정의 아래 문단), 숨은 설명(tcmt), 문단 바로 아래 컨트롤 없이 달린 글 목록(hwplib etc.hwp, 메모·변경 기록으로
-  보이나 확인 못 함)의 글은 읽지 않고 경고를 남긴다.
+- 바탕쪽(구역 정의 아래 LIST_HEADER마다 문단들)은 secPr 안 masterPage/subList로, 숨은 설명(tcmt)은 hiddenComment로,
+  자동 번호(atno: 속성 0~3비트 번호 종류, 4~11비트 번호 모양, 번호 u16, 사용자 기호·앞·뒤 장식 WCHAR)는 autoNum으로 옮겨
+  HWPX와 같은 코드로 읽는다 (v1.4.1). 문단 바로 아래 컨트롤 없이 달린 글 목록(hwplib etc.hwp, 메모·변경 기록으로 보이나
+  확인 못 함)의 글은 아직 읽지 않고 경고를 남긴다.
 - 문서 요약 정보(HwpSummaryInformation)는 직접 읽는다. olefile은 UTF-16 문자열 길이를 바이트로 읽어 뒤 속성까지 섞었다.
 - 실제 제안요청서 5개: 한컴오피스 미리보기 글 재현율 1.000, 본문 글자 수가 레코드 글자 수와 같다 (정규화로 바뀐 'ｏ'·'ㆍ' 등만 다름).
 
@@ -133,8 +135,12 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
 - 머리말·꼬리말은 첫 양쪽·홀수 쪽 것이 화면용이고, 짝수 쪽이나 다른 구역의 것도 글이 다르면 뒤에 함께 담는다
   (예전에는 버려서 짝수 쪽 머리말 글이 경고 없이 빠졌다).
 - 개체 캡션(`hp:caption/hp:subList`)은 개체 안이 아니라 따로 있다. 개체 바로 뒤(side=TOP이면 바로 앞) 문단으로 둔다.
-- 메모(`hp:fieldBegin type="MEMO"`의 subList)와 바탕쪽(`Contents/masterpageN.xml`)의 글은 읽지 않고 경고를 남긴다
-  (v1.0 기준: docs/GOAL.md). Word 메모(word/comments.xml)도 같다.
+- 메모(`hp:fieldBegin type="MEMO"`의 subList)는 v1.4.0부터 Note(kind="comment")와 붙은 자리의 NoteRef. 숨은 설명
+  (`hp:hiddenComment`)도 v1.4.1부터 같은 모양 (이름표 '숨은 설명N', 열쇠 hcN).
+- 바탕쪽(`Contents/masterpageN.xml`)의 글은 쪽마다 되풀이되는 글이라 머리말 뒤에 담는다 (style_name='master_page',
+  같은 글은 한 번, 글 없는 바탕쪽은 넣지 않는다). 기준 문서 묶음 HWPX 158개에는 글 있는 바탕쪽이 없었다.
+- 캡션 번호('그림 1'의 1)는 글이 아니라 자동 번호 컨트롤(`hp:autoNum num numType`, `hp:autoNumFormat`)이다. 그림·표·수식
+  번호는 번호 모양·앞뒤 장식 문자대로 글로 넣는다. 쪽 번호·각주 번호 autoNum은 넣지 않는다 (예전에는 '그림 '만 남았다).
 - 글 가운데 놓인 개체(앞뒤 모두 글이 있는 글상자·표·도식)는 그 자리에서 문단을 나눈다: '앞 글' 문단, 개체, '뒤 글' 문단.
   한컴 미리보기가 그 자리에서 읽기 때문이다 (hwpxlib RectInPara 미리보기 재현율 0.78 → 1.00). 나뉜 문단은 같은 원문 문단의
   출처를 갖고, 번호(list_info)는 첫 조각에만 둔다. 한쪽에만 글이 있으면 떠 있는 개체는 문단 앞, 나머지는 문단 뒤. 제목 문단은 나누지 않는다.

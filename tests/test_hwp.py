@@ -373,7 +373,8 @@ def test_hwp_chart_data_grid():
 
 def test_hwp_caption_hidden_comment_and_master_page():
     # 개체 캡션(컨트롤 아래, 개체 레코드 앞의 LIST_HEADER + 문단)은 개체 뒤 문단으로 읽는다.
-    # 숨은 설명(tcmt)·바탕쪽(구역 정의 아래 문단)의 글은 v1.0에서 읽지 않고 경고를 남긴다
+    # 숨은 설명(tcmt)·바탕쪽(구역 정의 아래 문단)의 글은 v1.0에서 경고만 남겼고, v1.4.1부터 숨은 설명은 메모 목록,
+    # 바탕쪽은 머리말 뒤로 읽는다 (본문에는 넣지 않는다)
     caption = rec(Tag.LIST_HEADER, 2, struct.pack("<hHII", 1, 0, 0, 3) + bytes(14)) + para(2, "그림 1. 흐름")
     obj = gso(1, 7, 10000, 5000) + caption + rec(Tag.SHAPE_COMPONENT, 2, component("$rec", 10000, 5000, instid=8))
     obj += rect_points(3, 10000, 5000)
@@ -387,5 +388,7 @@ def test_hwp_caption_hidden_comment_and_master_page():
     kinds = [(type(b).__name__, getattr(b, "text", "")) for b in doc.blocks]
     assert ("Paragraph", "그림 1. 흐름") in kinds and kinds.index(("Paragraph", "그림 1. 흐름")) == \
         [k for k, _ in kinds].index("Drawing") + 1
-    assert "숨은 설명의 글은 넣지 않음" in doc.warnings and "바탕쪽의 글은 넣지 않음" in doc.warnings
+    assert not doc.warnings
+    assert [n.blocks[0].text for n in doc.notes.values()] == ["숨은 글"]
+    assert [(b.style_name, b.text) for b in doc.header] == [("master_page", "바탕쪽 글")]
     assert not any("숨은 글" in t or "바탕쪽 글" in t for _, t in kinds)
