@@ -131,10 +131,15 @@ _DATE_ONLY = re.compile(r"^\s*\d{4}\s*[.년]\s*\d{1,2}\s*[.월]\s*\d{1,2}\s*[.�
 _SENTENCE = re.compile(r"(니다|습니다|한다|된다|이다|있다|없다|하라|하시오|바랍니다)\s*[.!]?\s*[>〉》\])）」』】]*\s*$")
 
 
+_BULLET_LINE = re.compile(r"^\s*[□○◦❍ㅇ※]\s")  # 개조식 항목 (공문서의 □ ○ ㅇ). 계층은 OutlineInfo가 맡는다
+_BRACKET_LINE = re.compile(r"^\s*[<〈＜《]\s*[^<>〈〉＜＞《》]+[>〉＞》]\s*$")  # '< 측정 결과 >' 모양
+
+
 def _not_a_title(text: str) -> bool:
-    """제목으로 분류되었어도 제목이 아닌 줄: 날짜뿐인 줄, '- 다 음 -', 문장."""
+    """제목으로 분류되었어도 제목이 아닌 줄: 날짜뿐인 줄, '- 다 음 -', 문장, 개조식 항목(□ ○ ㅇ ※)."""
     t = text.strip()
-    return bool(_DATE_ONLY.match(t) or re.sub(r"[\s\-–—]", "", t) == "다음" or _SENTENCE.search(t))
+    return bool(_DATE_ONLY.match(t) or re.sub(r"[\s\-–—]", "", t) == "다음" or _SENTENCE.search(t)
+                or _BULLET_LINE.match(t))
 
 
 def _same_table(a, b, last_page: int | None = None) -> bool:
@@ -1053,8 +1058,13 @@ class PdfParser:
         한남대 공고서 제목 정밀도 0.625).
         """
         demoted = set()
-        for k, b in enumerate(self.doc.blocks):
-            if isinstance(b, Heading) and _not_a_title(b.text):
+        blocks = self.doc.blocks
+        for k, b in enumerate(blocks):
+            # 표·그림 바로 앞의 '< … >' 줄은 그 표·그림의 제목(캡션)이다. 절 제목이 아니다 (2026-10-18 정한 기준:
+            # 보도자료 '< 생활제품 측정 결과 >'). 표 뒤의 줄은 다음 절 제목일 수 있어 그대로 둔다
+            caption = (isinstance(b, Heading) and _BRACKET_LINE.match(b.text) is not None and k + 1 < len(blocks)
+                       and isinstance(blocks[k + 1], (Table, Figure)))
+            if isinstance(b, Heading) and (_not_a_title(b.text) or caption):
                 self.doc.blocks[k] = Paragraph(id=b.id, prov=b.prov, inlines=b.inlines, style=b.style)
                 demoted.add(id(b))
         if demoted:

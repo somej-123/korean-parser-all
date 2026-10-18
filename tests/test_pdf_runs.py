@@ -184,3 +184,27 @@ def test_dates_dividers_and_sentences_are_not_titles():
         assert _not_a_title(text), text
     for text in ["1 입찰개요", "용 역 계 약 입 찰 공 고", "2026년 사업계획", "<자료 검색>", "Ⅱ. 추진 방향"]:
         assert not _not_a_title(text), text
+
+
+def test_bullet_lines_and_table_titles_are_not_titles():
+    # 2026-10-18 정한 기준: 개조식 항목(□ ○ ㅇ ※) 줄은 제목이 아니고(계층은 OutlineInfo), 표·그림 바로 앞의 '< … >' 줄은 그
+    # 표·그림의 제목이다 (보도자료 정밀도 0.353: 더 낸 제목 11개 중 10개가 이 두 가지)
+    from korean_parser.ir import Cell, Document, Heading, Paragraph, Row, Table, Text
+    from korean_parser.parsers.pdf import PdfParser, _not_a_title
+
+    assert _not_a_title("□ 생활제품 등") and _not_a_title("○ 측정 대상") and not _not_a_title("■ 1장 개요")
+    parser = PdfParser.__new__(PdfParser)
+    parser.doc = Document()
+
+    def h(i, text):
+        return Heading(id=f"h{i}", level=1, inlines=[Text(text=text)])
+
+    def table(i, cells):
+        return Table(id=f"t{i}", rows=[Row(cells=[Cell(blocks=[Paragraph(id="p", inlines=[Text(text=t)])]) for t in cells])])
+
+    parser.doc.blocks = [h(1, "< 생활제품 측정 결과 >"), table(1, ("가", "1")), h(2, "< 추진 배경 >"),
+                         Paragraph(id="p1", inlines=[Text(text="본문")]), table(2, ("나", "2")), h(3, "< 붙임 >")]
+    parser._demote_non_titles()
+    kinds = [(type(b).__name__, getattr(b, "text", "")) for b in parser.doc.blocks]
+    assert kinds[0] == ("Paragraph", "< 생활제품 측정 결과 >")  # 표 바로 앞: 표 제목
+    assert kinds[2] == ("Heading", "< 추진 배경 >") and kinds[5] == ("Heading", "< 붙임 >")  # 표 앞이 아니면 그대로
