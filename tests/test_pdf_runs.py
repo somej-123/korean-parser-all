@@ -149,3 +149,27 @@ def test_glyph_outline_drawn_over_its_own_text_is_not_a_cover():
     # 흰 상자로 가린 글, 여러 글자를 덮는 큰 도형은 덮개다
     assert not _glyph_outline(char, (35, 31, 32), (755.6, 105.2, 769.0, 118.5), (255, 255, 255))
     assert not _glyph_outline(char, (0, 0, 0), (700.0, 100.0, 900.0, 130.0), (0, 0, 0))
+
+
+def test_table_split_over_many_pages_is_joined_to_the_end():
+    # 12쪽에 걸친 표가 두 쪽씩 이어져 표 6개가 되었다 (이은 표의 첫 쪽 번호로 다음 쪽을 판단). 두 줄 머리 행은 쪽마다 되풀이된다
+    from korean_parser.ir import Cell, Document, PageBreak, Paragraph, Provenance, Row, Table, Text
+    from korean_parser.parsers.pdf import PdfParser
+
+    def row(*texts):
+        return Row(cells=[Cell(blocks=[Paragraph(id="p", inlines=[Text(text=t)])]) for t in texts])
+
+    head = [row("구분", "연락처"), row("기관", "전화")]
+
+    def table(page, *data):
+        return Table(id=f"t{page}", prov=Provenance(parser="t", page=page, bbox=(50, 80, 540, 700)),
+                     col_widths_pt=[200, 290], rows=[r.model_copy(deep=True) for r in head] + [row(*d) for d in data])
+
+    parser = PdfParser.__new__(PdfParser)
+    parser.doc = Document()
+    parser.doc.blocks = [table(1, ("가", "1")), PageBreak(id="b2"), table(2, ("나", "2")), PageBreak(id="b3"),
+                         table(3, ("다", "3"))]
+    parser._merge_split_tables()
+    tables = [b for b in parser.doc.blocks if isinstance(b, Table)]
+    assert len(tables) == 1
+    assert [r.cells[0].blocks[0].text for r in tables[0].rows] == ["구분", "기관", "가", "나", "다"]

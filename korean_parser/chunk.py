@@ -140,16 +140,16 @@ class _Chunker:
         out: list[_Unit] = []
         stack: list[tuple[tuple[int, int], str]] = []  # (단계, 제목)
         heading_level = 0
-        for b in self._stream(self.doc.blocks):
-            if isinstance(b, PageBreak):
-                continue
+        flow = [b for b in self._stream(self.doc.blocks) if not isinstance(b, PageBreak)]
+        for k, b in enumerate(flow):
             title_rank = None
             if isinstance(b, Heading):
                 heading_level = b.level
                 self.titles.heading(b)
                 title_rank = (b.level, -1)
             elif isinstance(b, Paragraph):
-                found = self.titles.paragraph(b)  # 제목처럼 쓰인 번호 문단 (heading_guess와 같은 판단)
+                # 제목처럼 쓰인 번호 문단 (heading_guess와 같은 판단, 바로 아래가 표인지도 같이 본다)
+                found = self.titles.paragraph(b, before_table=k + 1 < len(flow) and isinstance(flow[k + 1], Table))
                 if found is not None:
                     title_rank = (heading_level, found[0])  # (개조식 단계, 근거, 표지 종류)
             if title_rank is not None:

@@ -14,6 +14,12 @@ DOCX·HWPX·HWP 문서는 제목 스타일·개요 번호 대신 '굵고 큰 번
   본문 = 최상위 문단 글자 크기의 중앙값(글자 수 가중). 번호는 1.05배, 기호는 1.1배 이상이고 0.9pt 넘게 크면 크다.
 - ':'가 없다 ('사업기간 : 7개월'처럼 항목: 값을 적은 줄은 제목이 아니다)
 
+굵거나 크지 않아도 제목으로 보는 경우 (실제 문서 구조 정답, benchmarks/real_truth):
+- 점이 여러 개인 십진 번호('2.2 가스기술기준', '5.2.1 수소 튜브'): 규격서·지침의 절 번호다. 번호 자체가 제목의 표시다.
+- 번호 문단 바로 다음이 표('2. PM 주차구역 설치 현황' 다음에 표): 표 제목이다 (표지를 뺀 글 30자 이하).
+사용자 정의 영역 글자(한컴 기호 글꼴)로 시작하는 문단은, 같은 문서에 바로 앞·뒤 글자로 시작하는 문단이 있으면
+(❶ ❷ ❸처럼 차례로 이어지면) 번호로 본다. 보도자료 부록의 번호 제목이 이렇게 쓰여 후보에서 빠졌다.
+
 단계는 바로 앞 Heading의 단계에, 그 아래에서 추정 제목의 표지 종류가 처음 나온 순서(Ⅰ. → 1, 1. → 2 …)를 더한
 값이다 (1~6). 청크 도구(chunk.py)도 같은 판단(제목인지 아닌지)으로 조각의 제목 경로를 만든다.
 
@@ -33,6 +39,12 @@ _BULLET_KINDS = {"square", "circle", "dash", "dot"}  # 기호: 큰 글씨일 때
 _NEVER_KINDS = {"note"}  # ※ 참고
 _TOC_LINE = re.compile(r"(\t|\.{3,}|·{3,}|…|-{3,})\s*[\d#ivxIVX\-~ ]*\s*$")  # 목차 줄: "Ⅰ. 개요 ···· 3"
 _TITLE_TAIL = re.compile(r"([.。:;,]|[다음함임됨]\.?)$")  # 문장으로 끝나는 문단은 제목이 아니다
+_DECIMAL = re.compile(r"^(\d{1,2}(?:\.\d{1,2}){1,3})\.?\s+(?=\D)")  # 2.2 / 5.2.1 / 6.7.10 (점이 여러 개인 절 번호)
+
+
+def _private_use(ch: str) -> bool:
+    cp = ord(ch) if ch else 0
+    return 0xE000 <= cp <= 0xF8FF or cp >= 0xF0000
 
 
 def body_size(doc: Document) -> float | None:
@@ -62,16 +74,25 @@ class TitleFinder:
     """
 
     def __init__(self, doc: Document):
+        from .ir import walk_blocks
+
         self.body_size = body_size(doc)
         self.heading_level = 0
         self.kind_level: dict[str, int] = {}
+        # 사용자 정의 영역 글자 중 '번호'로 쓰인 것: 같은 문서에 바로 앞·뒤 글자로 시작하는 문단이 있다 (❶ ❷ ❸ …)
+        firsts = {ord(b.text.lstrip()[0]) for b in walk_blocks(doc.blocks)
+                  if isinstance(b, Paragraph) and b.text.strip() and _private_use(b.text.lstrip()[0])}
+        self.pua_numbers = {c for c in firsts if c - 1 in firsts or c + 1 in firsts}
 
     def heading(self, h: Heading) -> None:
         self.heading_level = h.level
         self.kind_level.clear()
 
-    def paragraph(self, p: Paragraph) -> tuple[int, str, str] | None:
-        """제목처럼 쓰인 번호 문단이면 (개조식 단계 0부터, 근거, 표지 종류), 아니면 None."""
+    def paragraph(self, p: Paragraph, before_table: bool = False) -> tuple[int, str, str] | None:
+        """제목처럼 쓰인 번호 문단이면 (개조식 단계 0부터, 근거, 표지 종류), 아니면 None.
+
+        before_table: 바로 다음 블록이 표다 (표 제목이면 굵거나 크지 않아도 제목으로 본다).
+        """
         if p.outline is not None:
             self.kind_level.setdefault(p.outline.kind, p.outline.level)
         body = title_text(p)
@@ -83,11 +104,18 @@ class TitleFinder:
             kind = f"list:{p.list_info.list_id}:{p.list_info.level}" if p.list_info.ordered else "dot"
         elif m and m[0] in self.kind_level:  # 제목 상자(한 칸 표) 안의 "Ⅱ. 시스템 현황" 등
             level, marker, kind = self.kind_level[m[0]], m[1], m[0]
+        elif d := _DECIMAL.match(body):  # 2.2 가스기술기준
+            marker = d.group(1)
+            level, kind = marker.count("."), f"decimal{marker.count('.') + 1}"
+            m = (kind, marker, body[d.end():].strip())
+        elif body and ord(body[0]) in self.pua_numbers and body[1:2].isspace():  # 한컴 기호 글꼴의 ❶ ❷ …
+            level, marker, kind = 0, body[0], "pua_number"
+            m = (kind, marker, body[1:].strip())
         else:
             return None
         if kind in _NEVER_KINDS:
             return None
-        if not marker.strip() or "" <= body[:1] <= "":
+        if kind != "pua_number" and (not marker.strip() or _private_use(body[:1])):
             kind = "dot"  # 보이는 번호가 없거나 기호 글꼴 문자(사용자 정의 영역)로 시작: 글머리 기호로 본다
         if _TOC_LINE.search(p.text):
             return None
@@ -101,9 +129,15 @@ class TitleFinder:
         # 기호: 1.1배 이상 (본문 14pt에 개조식 항목을 15pt로 쓰는 문서가 있다)
         ratio = 1.1 if kind in _BULLET_KINDS else 1.05
         bigger = bool(sizes and self.body_size and max(sizes) >= max(self.body_size * ratio, self.body_size + 0.9))
-        if not (bigger if kind in _BULLET_KINDS else bold or bigger):
+        decimal = kind.startswith("decimal")
+        table_title = before_table and kind not in _BULLET_KINDS and len(rest) <= 30
+        if not (bigger if kind in _BULLET_KINDS else bold or bigger or decimal or table_title):
             return None
         why = [f"{'기호' if kind in _BULLET_KINDS else '번호'} '{marker}'"]
+        if decimal:
+            why.append("절 번호")
+        if table_title and not (bold or bigger or decimal):
+            why.append("바로 아래 표")
         if bold:
             why.append("굵게")
         if bigger:
@@ -132,14 +166,13 @@ def annotate_heading_guesses(doc: Document) -> None:
 
     finder = TitleFinder(doc)
     ranks: dict[str, int] = {}  # 바로 앞 Heading 아래에서 추정 제목의 표지 종류 → 처음 나온 순서
-    for b in stream(doc.blocks, LlmRenderer(doc, with_ids=False)):
-        if isinstance(b, PageBreak):
-            continue
+    flow = [b for b in stream(doc.blocks, LlmRenderer(doc, with_ids=False)) if not isinstance(b, PageBreak)]
+    for k, b in enumerate(flow):
         if isinstance(b, Heading):
             finder.heading(b)
             ranks.clear()
         elif isinstance(b, Paragraph):
-            found = finder.paragraph(b)
+            found = finder.paragraph(b, before_table=k + 1 < len(flow) and isinstance(flow[k + 1], Table))
             if found is not None and b.heading_guess is None:  # 파서가 먼저 붙인 추정(슬라이드 제목 등)은 그대로
                 _, why, kind = found
                 rank = ranks.setdefault(kind, len(ranks))

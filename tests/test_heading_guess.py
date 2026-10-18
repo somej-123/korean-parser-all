@@ -57,3 +57,30 @@ def test_level_continues_below_real_heading():
                            para(BODY), para(BODY)])
     enrich_korean(doc)
     assert doc.blocks[1].heading_guess.level == 3
+
+
+def test_section_numbers_table_titles_and_numbered_symbols():
+    # 실제 문서 구조 정답에서 모든 파서가 놓친 제목들 (benchmarks/real_truth)
+    from korean_parser.ir import Cell, Row, Table
+
+    table = Table(rows=[Row(cells=[Cell(blocks=[para("연번")]), Cell(blocks=[para("위치")])])])
+    out = dict(guesses([
+        Heading(level=1, inlines=[Text(text="적용규격")]), para(BODY),
+        para("2.2 가스기술기준 (KGS Code)"),  # 점이 여러 개인 절 번호: 굵지 않아도 제목
+        para(BODY),
+        para("5.2.1 수소 튜브트레일러(T/T)"),
+        para("4.1.2 단위는 SI단위 사용을 원칙으로 한다."),  # 문장은 절 번호가 있어도 본문
+        para("2. PM 주차구역 설치 현황"), table,  # 바로 아래가 표: 표 제목
+        para("\U000f02b1 지급 대상", 11, True), para(BODY),  # 한컴 기호 글꼴 번호 ❶ ❷ (차례로 이어짐)
+        para("\U000f02b2 지원 금액 및 예산액", 11, True),
+    ]))
+    assert out["2.2 가스기술기준 (KGS Code)"] == 2 and out["5.2.1 수소 튜브트레일러(T/T)"] == 3
+    assert out["4.1.2 단위는 SI단위 사용을 원칙으로 한다."] is None
+    assert out["2. PM 주차구역 설치 현황"] is not None
+    assert out["\U000f02b1 지급 대상"] is not None and out["\U000f02b2 지원 금액 및 예산액"] is not None
+
+
+def test_lone_private_use_bullet_is_still_a_bullet():
+    # 같은 글자가 되풀이되는 기호(차례로 이어지지 않음)는 굵게만으로는 제목이 아니다
+    out = dict(guesses([para(BODY), para(" 강조한 항목", 11, True), para(" 다른 항목", 11, True)]))
+    assert out[" 강조한 항목"] is None

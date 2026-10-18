@@ -127,9 +127,14 @@ def _row_texts(row) -> list[str]:
     return [" ".join(getattr(x, "text", "") for x in c.blocks).strip() for c in row.cells]
 
 
-def _same_table(a, b) -> bool:
-    """쪽을 넘어 이어지는 같은 표인가: 다음 쪽 표이고 열 수와 열 너비가 같다."""
-    if not isinstance(b, Table) or not a.prov or not b.prov or b.prov.page != a.prov.page + 1:
+def _same_table(a, b, last_page: int | None = None) -> bool:
+    """쪽을 넘어 이어지는 같은 표인가: 다음 쪽 표이고 열 수와 열 너비가 같다.
+
+    last_page: a가 이미 여러 쪽을 이은 표면 그 마지막 쪽 (a.prov.page는 첫 쪽이다).
+    """
+    if not isinstance(b, Table) or not a.prov or not b.prov:
+        return False
+    if b.prov.page != (last_page or a.prov.page) + 1:
         return False
     wa, wb = a.col_widths_pt, b.col_widths_pt
     if not wa or len(wa) != len(wb):
@@ -837,8 +842,9 @@ class PdfParser:
     def _merge_split_tables(self) -> None:
         """쪽을 넘어가며 둘로 나뉜 표를 하나로 잇는다.
 
-        앞 쪽의 마지막 블록이 표이고 다음 쪽의 첫 블록이 열 수·열 너비가 같은 표면 같은 표다.
-        다음 쪽 표가 머리 행을 되풀이했으면(첫 행 글이 같으면) 그 행은 뺀다.
+        앞 쪽의 마지막 블록이 표이고 다음 쪽의 첫 블록이 열 수·열 너비가 같은 표면 같은 표다. 여러 쪽에 걸친 표는
+        끝까지 잇는다 (예전에는 이은 표의 첫 쪽 번호로 다음 쪽을 판단해서 두 쪽씩만 이어졌다: 12쪽 표가 표 6개가 됨).
+        다음 쪽 표가 머리 행을 되풀이했으면 앞 표의 첫 행부터 글이 같은 행을 모두 뺀다 (두 줄 머리 행).
         """
         blocks = self.doc.blocks
         out: list[Block] = []
@@ -847,17 +853,22 @@ class PdfParser:
             b = blocks[i]
             out.append(b)
             i += 1
+            last_page = b.prov.page if isinstance(b, Table) and b.prov else None
             while isinstance(b, Table):
                 j = i
                 while j < len(blocks) and isinstance(blocks[j], PageBreak):
                     j += 1
-                if j == i or j >= len(blocks) or not _same_table(b, blocks[j]):
+                if j == i or j >= len(blocks) or not _same_table(b, blocks[j], last_page):
                     break
                 nxt = blocks[j]
                 rows = nxt.rows
-                if rows and b.rows and _row_texts(rows[0]) == _row_texts(b.rows[0]):
-                    rows = rows[1:]  # 되풀이한 머리 행
-                b.rows.extend(rows)
+                k = 0
+                while k < len(rows) and k < len(b.rows) and _row_texts(rows[k]) == _row_texts(b.rows[k]):
+                    k += 1  # 되풀이한 머리 행 (한 줄 이상)
+                if k == len(rows):
+                    k = 0  # 다음 쪽 표 전체가 앞 표의 머리와 같으면 머리 행이 아니라 내용이다
+                b.rows.extend(rows[k:])
+                last_page = nxt.prov.page
                 out.extend(blocks[i:j])  # 쪽 나눔 표시는 이은 표 뒤로
                 i = j + 1
         self.doc.blocks = out
