@@ -31,6 +31,11 @@ from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, insi
 PARSER_NAME = "pdf-docling"
 _CAPTION = re.compile(r"^[\[<(]?\s*(그림|표|도표|사진|Figure|Fig\.?|Table)\s*[\d IVX]+", re.I)
 _CONVERTERS: dict[tuple, object] = {}
+# OCR 글이 빠진 쪽을 알리는 기준: 쪽의 OCR 글자(글자·숫자) 중 이 비율보다 많이, 이 글자 수 이상 블록에 없으면 경고.
+# 실제 공공 PDF 25개로 만든 스캔본(benchmarks/eval/real_scan.py 방식, 쪽 4개씩)에서 정상 쪽은 많아야 8%가 빠지고,
+# 목차 표를 건너뛰던 v1.4.1 전 코드는 목차 쪽의 94~99%를 빠뜨렸다
+OCR_LOSS_RATIO = 0.2
+OCR_LOSS_MIN_CHARS = 20
 
 
 class PdfEngineMissing(RuntimeError):
@@ -297,6 +302,7 @@ class PdfParser:
         self._page_images: dict = {}  # 쪽 번호 → 스캔 쪽 그림 (ocr_spacing.PageImage), 한 번만 그린다
         self._ocr_gap: float | None = None  # 문서의 OCR 공백 기준 (em)
         self._done: set[str] = set()  # 블록으로 만든 Docling 항목 (그림이 뒤늦게 가져가지 않도록)
+        self.ocr_loss: dict[int, tuple[int, int]] = {}  # 스캔: 쪽 번호 → (블록에 없는 OCR 글자 수, OCR 글자 수)
 
     def _new_id(self) -> str:
         self._seq += 1
@@ -732,6 +738,8 @@ class PdfParser:
             self._insert_by_position(blk)
         for n, grid in self._extra_tables:  # Docling이 놓친 괘선 표
             self._insert_by_position(self._ruled_table(grid, self.pages.page(n)))
+        if self.ocr:
+            self._check_ocr_coverage()  # 쪽을 넘는 문단·표를 잇기 전에 잰다 (이으면 뒤쪽 글이 앞쪽 블록에 들어간다)
         self._fix_page_order()
         self._merge_split_tables()
         self._merge_split_paragraphs()
@@ -739,6 +747,48 @@ class PdfParser:
         self._apply_links()
         self._link_footnotes()
         self._vertical_spacing()
+
+    def _check_ocr_coverage(self) -> None:
+        """OCR이 쪽에서 읽은 글이 블록에 다 들어갔는지 쪽마다 재고, 눈에 띄게 빠진 쪽은 경고로 남긴다.
+
+        스캔본은 정답 글이 없어서 글이 빠져도 알 수 없다 (v1.4.1 전까지 스캔본의 목차가 경고 없이 통째로 빠졌다).
+        그래서 Docling이 읽은 쪽별 OCR 글자(레이아웃 영역의 OCR 상자)를 기준으로, 그 쪽 블록(표 칸·그림 안 글자·캡션
+        포함)과 머리말·꼬리말이 담은 글자를 순서 없이 센다. 글자·숫자만 센다: 기호는 OCR이 'O'로 읽은 ○를 되살리는 등
+        일부러 바꾸는 것이 있고, 목차 점선은 원래 블록에 넣지 않는다.
+        """
+        import collections
+
+        def count(text: str) -> collections.Counter:
+            return collections.Counter(ch for ch in normalize_text(text) if ch.isalnum())
+
+        def block_text(b) -> str:
+            if isinstance(b, Figure):
+                return " ".join(t for t in (b.caption, b.inner_text) if t)
+            marker = b.list_info.marker if getattr(b, "list_info", None) else ""
+            return marker + " " + (getattr(b, "text", "") or "")
+
+        got: dict[int, collections.Counter] = {}
+        for b in self.doc.blocks:
+            if b.prov and b.prov.page:
+                c = got.setdefault(b.prov.page, collections.Counter())
+                for x in walk_blocks([b]):
+                    c.update(count(block_text(x)))
+        shared = collections.Counter()  # 머리말·꼬리말은 한 번만 담으므로 모든 쪽의 몫으로 센다
+        for x in walk_blocks(self.doc.header + self.doc.footer):
+            shared.update(count(block_text(x)))
+        lost = []
+        for n in sorted(self._ocr_cells):
+            # 같은 OCR 상자가 겹친 레이아웃 영역(표와 그 안의 글 등) 여러 곳에 들어 있기도 하다: 한 번만 센다
+            # (실제 신청서 양식 스캔: 상자 215개 중 서로 다른 상자는 111개라 절반이 빠진 것으로 잘못 셌다)
+            cells = {(c.text, tuple(round(v) for v in c.box)) for c in self._ocr_cells[n]}
+            want = count(" ".join(t for t, _ in cells))
+            total = sum(want.values())
+            missing = total - sum((want & (got.get(n, collections.Counter()) + shared)).values())
+            self.ocr_loss[n] = (missing, total)
+            if total and missing >= OCR_LOSS_MIN_CHARS and missing / total > OCR_LOSS_RATIO:
+                lost.append(f"{n}쪽 {missing / total:.0%}")
+        if lost:
+            self.doc.warnings.append(f"OCR이 읽은 글 중 일부를 문서에 넣지 못했습니다 (빠진 비율: {', '.join(lost)}).")
 
     def _looks_like_title(self, page: PageInfo, box: BBox) -> bool:
         """쪽 맨 위 한 줄이 문서의 다른 제목보다 확실히 큰 글씨인가 (Docling이 표지 제목을 머리말로 분류하는 경우).

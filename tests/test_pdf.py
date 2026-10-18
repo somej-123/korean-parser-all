@@ -219,6 +219,39 @@ def test_scanned_table_of_contents_is_kept(tmp_path):
         draw.text((1060, y), str(page), font=font, fill="black")
     scan = tmp_path / "toc.pdf"
     img.save(scan, "PDF", resolution=150)
-    text = re.sub(r"\s", "", render_llm(parse(scan), with_ids=False))
+    doc = parse(scan)
+    text = re.sub(r"\s", "", render_llm(doc, with_ids=False))
     found = [t for t, _ in items if re.sub(r"\s", "", t.split(". ")[1]) in text]
     assert len(found) >= 9, found  # OCR 글자 오류로 한두 개는 다를 수 있다 (고치기 전에는 0개)
+    assert not [w for w in doc.warnings if "넣지 못했습니다" in w]  # 다 담았으면 OCR 손실 경고가 없다
+
+
+def test_ocr_text_left_out_is_warned():
+    # 스캔본에서 OCR이 읽은 글이 블록에 들어가지 않은 쪽을 경고로 알린다. 목차 표를 건너뛰어 목차가 경고 없이 통째로
+    # 빠졌던 일을 다시 놓치지 않기 위해서다. 공백·기호 차이(OCR 'O' → ○)와 머리말로 한 번만 담은 글은 빠진 것으로 보지 않는다
+    from korean_parser.ir import Document, ListInfo, Provenance, Text
+    from korean_parser.parsers.pdf import PdfParser
+    from korean_parser.parsers.pdf.ocr_spacing import OcrCell
+
+    toc = ["Ⅰ. 사업 개요 ········ 3", "1. 추진 배경 ········ 4", "2. 추진 목표 ········ 6", "Ⅱ. 추진 계획 ········ 8"]
+    ocr = {1: [OcrCell(t, (100, 100 + 30 * k, 500, 120 + 30 * k)) for k, t in enumerate(toc)],
+           2: [OcrCell("사업 계획서", (100, 20, 300, 40)), OcrCell("O 추진배경: 공공 서비스의 품질을 높인다", (100, 200, 500, 220))]}
+
+    def para(page: int, text: str, marker: str | None = None) -> Paragraph:
+        return Paragraph(id=f"b{page}{len(text)}", prov=Provenance(parser="t", page=page, bbox=(100, 100, 500, 200)),
+                         inlines=[Text(text=text)], list_info=ListInfo(level=1, marker=marker, ordered=False) if marker else None)
+
+    def warnings(blocks, header=()):
+        p = PdfParser.__new__(PdfParser)
+        p.doc, p.ocr_loss, p._ocr_cells = Document(blocks=blocks, header=list(header)), {}, ocr
+        p._check_ocr_coverage()
+        return [w for w in p.doc.warnings if "넣지 못했습니다" in w]
+
+    body = para(2, "추진 배경: 공공 서비스의 품질을 높인다", "○")
+    lines = [para(1, t.split(" ··")[0] + " " + t.split()[-1]) for t in toc]
+    assert warnings(lines + [body], header=[para(2, "사업 계획서")]) == []
+    assert warnings(lines[1:] + [body], header=[para(2, "사업 계획서")]) == []  # 한 줄(7자)만 빠짐: 기준보다 적다
+    lost = warnings([body], header=[para(2, "사업 계획서")])  # 목차 쪽이 통째로 빠짐 (머리말 글자만큼은 담은 것으로 센다)
+    assert len(lost) == 1 and "1쪽" in lost[0] and "2쪽" not in lost[0]
+    ocr[2] = ocr[2] * 2  # 겹친 레이아웃 영역에 같은 OCR 상자가 두 번 들어 있어도 한 번만 센다
+    assert warnings(lines + [body], header=[para(2, "사업 계획서")]) == []

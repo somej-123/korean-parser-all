@@ -9,6 +9,10 @@ PPTX a:t, XLSX 글 칸) 우리 결과에 남은 비율을 잰다. 메모(한글 
 읽으므로 원문에 넣는다. 두 쪽 모두 같은 정규화(normalize_text, NFKC, 공백 제거)를 한다.
 두 쪽(슬라이드) 이상, 절반 넘게 되풀이되는 줄은 한 번만 세고, 숫자만 있는 짧은 줄(쪽 번호)은 뺀다 (파서가 일부러 한 번만 남기거나 버린다).
 보존율이 0.99 미만인데 경고가 없으면 '경고 없이 사라진 글'로 표시한다.
+텍스트 레이어가 없는 스캔은 원문 글자를 따로 읽을 수 없어 건너뛴다. 대신 글자 층이 있는 실제 PDF(SCAN_SOURCES)를
+스캔본으로 만들어(benchmarks/eval/real_scan.py: 깨끗한 스캔, 거친 스캔) 원래 글자 층을 정답으로 글자 재현율(순서 무시)을
+잰다. 글자·숫자만 센다 (OCR은 '【별첨】'을 '[별첨]'으로 읽는 등 기호를 비슷한 기호로 바꾼다). 0.95 미만이거나
+스캔본에 'OCR 글을 넣지 못함' 경고가 나면 미달이다 (정상 문서이므로 그 경고는 거짓 경고다). --no-scan으로 뺄 수 있다.
 
 기준 2(구조 정확도): benchmarks/eval의 합성 정답 세트 평가와 HWPX 미리보기 비교를 그대로 돌려 GOAL.md의 수치와 비교한다.
 """
@@ -57,6 +61,10 @@ STRUCTURE = [
     ("docx (추정 제목 포함)", "heading", "recall", ">=", 0.95), ("docx", "table_teds", None, ">=", 1.0),
 ]
 HWPX_PREVIEW_MIN = 0.98
+# 기준 1의 스캔 재기 (docs/GOAL.md): 스캔본으로 만들 실제 공공 PDF (공공데이터포털 번호, samples_rfp 아래에서 찾는다)
+SCAN_SOURCES = ("15068570", "15130321", "15161182", "15165208", "15161180", "15162982", "3038333")
+SCAN_RECALL_MIN = 0.95
+OCR_LOSS_WARNING = "OCR이 읽은 글 중 일부를 문서에 넣지 못했습니다"
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
@@ -337,6 +345,50 @@ def check_file(path: Path) -> dict:
     return row
 
 
+def scan_rows() -> list[dict]:
+    """글자 층이 있는 실제 PDF를 스캔본으로 만들어, 원래 글자 층 글자 중 우리 결과에 있는 비율을 잰다 (순서 무시).
+
+    real_scan.py와 같은 쪽(2·3쪽)·같은 스캔 두 가지를 쓴다. 우리 글은 기준 1과 같이 그림 안 글자·캡션까지 센다
+    (real_scan.py는 본문 블록만 세서 지도 그림의 글자가 많은 쪽은 더 낮게 나온다). 기호는 세지 않는다: 법무부 매뉴얼
+    목차에서 빠진 글자 70개 중 44개가 목차 가운뎃점과 OCR이 '[ ]'로 읽은 '【 】'였다.
+    """
+    import tempfile
+
+    import pypdfium2 as pdfium
+    from real_scan import PAGES, clean, make_scan, truth_text
+
+    def char_recall(truth: str, pred: str) -> float:
+        t = collections.Counter(ch for ch in norm(truth) if ch.isalnum())
+        p = collections.Counter(ch for ch in norm(pred) if ch.isalnum())
+        return sum((t & p).values()) / max(sum(t.values()), 1)
+
+    rows = []
+    for key in SCAN_SOURCES:
+        src = next(iter(sorted((ROOT / "samples_rfp").rglob(f"{key}_*.pdf"))), None)
+        if src is None:
+            rows.append({"file": key, "missing_source": True})
+            continue
+        with _PDFIUM_LOCK:
+            n = len(pdfium.PdfDocument(str(src)))
+            pages = [p for p in PAGES if p < n] or [0]
+            truth = clean(truth_text(src, pages))
+        for kind in ("clean", "rough"):
+            with tempfile.TemporaryDirectory() as d:
+                scan = Path(d) / "scan.pdf"
+                with _PDFIUM_LOCK:
+                    make_scan(src, pages, scan, rough=kind == "rough")
+                doc = parse(scan)
+            rows.append({"file": src.name, "kind": kind, "recall": char_recall(truth, clean(our_text(doc))),
+                         "lost": [w for w in doc.warnings if OCR_LOSS_WARNING in w]})
+            print(f"스캔     {src.name[:40]:40s} {kind} {rows[-1]['recall']:.3f}", flush=True)
+    return rows
+
+
+def scan_passed(rows: list[dict]) -> bool:
+    return bool(rows) and all(not r.get("missing_source") and r["recall"] >= SCAN_RECALL_MIN and not r["lost"]
+                              for r in rows)
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -377,7 +429,7 @@ def is_limited(row: dict) -> bool:
     return any(k in w for w in row.get("warnings", []) for k in LIMIT_WARNINGS)
 
 
-def report(rows: list[dict], struct: list[tuple]) -> str:
+def report(rows: list[dict], struct: list[tuple], scans: list[dict] | None = None) -> str:
     measured = [r for r in rows if "kept" in r]
     low = [r for r in measured if r["kept"] < KEPT_MIN]
     excepted = [r for r in low if is_limited(r)]
@@ -390,7 +442,10 @@ def report(rows: list[dict], struct: list[tuple]) -> str:
              f"{sum('skip' in r for r in rows)}개, 오류 {len(errors)}개)",
              f"- 보존율 {KEPT_MIN} 미만: {len(below)}개 (그중 경고 없음: {len(silent)}개)",
              f"- 예외 (의도한 크기 제한에 걸려 경고를 남김): {len(excepted)}개",
-             f"- 판정: **{'통과' if not below and not errors else '미달'}**", "",
+             f"- 스캔 (실제 PDF로 만든 스캔본 {len(scans or [])}개, 글자 재현율 {SCAN_RECALL_MIN} 이상): "
+             + ("재지 않음" if scans is None else "통과" if scan_passed(scans) else "미달"),
+             f"- 판정: **{'통과' if not below and not errors and (scans is None or scan_passed(scans)) else '미달'}**"
+             + (" (스캔은 재지 않음)" if scans is None else ""), "",
              "| 묶음 | 파일 | 형식 | 원문 글자 | 보존율 | 경고 | 빠진 글자(많은 순) |",
              "|---|---|---|---:|---:|---|---|"]
     for r in sorted(rows, key=lambda r: (r.get("kept", 2), r["file"].name)):
@@ -405,6 +460,16 @@ def report(rows: list[dict], struct: list[tuple]) -> str:
             warn = "; ".join(w[:40] for w in r["warnings"][:3])
             lines.append(f"| {r['set']} | {name} | {r['format']} | {r['chars']} | {r['kept']:.3f}{mark} | {warn} "
                          f"| {r['missing']} |")
+    if scans is not None:
+        lines += ["", "### 스캔: 실제 PDF로 만든 스캔본 (원래 글자 층이 정답, 순서 무시)", "",
+                  "| 원본 PDF | 스캔 | 글자 재현율 | OCR 손실 경고 |", "|---|---|---:|---|"]
+        for r in scans:
+            if r.get("missing_source"):
+                lines.append(f"| {r['file']} | - | 미확인 (samples_rfp에 없음: fetch_datagokr.py로 받는다) | |")
+                continue
+            mark = "" if r["recall"] >= SCAN_RECALL_MIN else " ✗"
+            lines.append(f"| {r['file'][:40]} | {r['kind']} | {r['recall']:.3f}{mark} | "
+                         f"{'✗ ' + r['lost'][0][:60] if r['lost'] else '없음'} |")
     lines += ["", "## 기준 2. 구조 정확도", ""]
     if struct:
         lines += ["| 대상 | 지표 | 기준 | 측정 | 판정 |", "|---|---|---|---:|---|"]
@@ -446,6 +511,7 @@ def main() -> int:
     p.add_argument("--out", default="goal_report.md")
     p.add_argument("--skip-eval", action="store_true", help="기준 2(정답 세트 평가) 생략")
     p.add_argument("--no-pdf", action="store_true", help="텍스트 레이어 PDF 생략 (느림)")
+    p.add_argument("--no-scan", action="store_true", help="실제 PDF로 만든 스캔본 재기 생략 (몇 분)")
     p.add_argument("--folder", type=Path, help="기준 문서 묶음 대신 이 폴더만 잰다 (새로 모은 문서 점검)")
     args = p.parse_args()
     rows = []
@@ -461,7 +527,8 @@ def main() -> int:
             rows.append(row)
             print(f"{set_name:8s} {f.name[:40]:40s} {row.get('kept', row.get('error', row.get('skip', ''))) if 'kept' not in row else round(row['kept'], 3)}",
                   flush=True)
-    text = report(rows, structure(args.skip_eval))
+    scans = None if args.no_scan or args.folder else scan_rows()
+    text = report(rows, structure(args.skip_eval), scans)
     Path(args.out).write_text(text, encoding="utf-8")
     print("보고서:", args.out)
     return 0
