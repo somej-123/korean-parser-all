@@ -1,13 +1,22 @@
 # 작업 인계
 
-## 지금 상태 (2026-10-18, v1.0.0)
+## 지금 상태 (2026-10-18, v1.3.0)
 
-v1.0 완료 기준(`docs/GOAL.md`)을 모두 통과해서 1.0.0으로 확정했다. 다음 일과 미룬 일은 `docs/GOAL.md`의 'v1.0 이후'에 있다.
+v1.0 완료 기준(`docs/GOAL.md`)을 모두 통과해서 1.0.0으로 확정했고, 그 뒤 실제 문서 정답으로 드러난 문제를 고쳐 1.3.0까지
+올렸다 (태그 v1.0.0 ~ v1.3.0). 다음 일과 미룬 일은 `docs/GOAL.md`의 'v1.0 이후'에 있다.
 지켜야 할 방향: GPU 없이 CPU로 돌린다. 품질이 먼저이고, 속도는 품질이 같은 방법끼리 고를 때만 본다.
 
-- 측정: `python benchmarks/goal/check.py --out goal_report.md` (기준 1·2·3 한 번에)
-- 다른 파서와 비교: `benchmarks/compare/README.md`
-- 실제 문서 모으기: `benchmarks/corpus/fetch_datagokr.py` (공공데이터포털, 받은 파일은 `samples_rfp/`에만)
+| 무엇을 재나 | 도구 | 마지막 결과 |
+|---|---|---|
+| v1.0 기준 1·2·3 | `python benchmarks/goal/check.py --out goal_report.md` | 파일 343개 통과(예외 1), 지표 11개, 요소 113개 |
+| 다른 파서 6개와 비교 | `benchmarks/compare/README.md` | 글 보존율·합성 정답 세트에서 가장 높음 (XLSX 초대형 시트만 낮음) |
+| 실제 문서 구조 정답 | `benchmarks/real_truth/README.md` | 처음 정답 6개: 제목 0.963/0.893, 표 0.988. 처음 보는 6개: 표 0.991 |
+
+- 실제 문서 모으기: `benchmarks/corpus/fetch_datagokr.py` (공공데이터포털, 받은 파일과 정답 파일은 `samples_rfp/`에만)
+- 정답을 새로 달면 `benchmarks/real_truth/check_truth.py`로 옮겨 적은 실수(원본에 없는 글, 맞물리지 않는 표 격자)를 먼저 찾는다.
+- 다음에 하면 좋은 일 (GOAL.md 'v1.0 이후'): 보도자료의 □ 줄·표 제목을 제목으로 낼지 기준 정하기, 쪽 사이에서 나뉜 표 행
+  합치기, 번호·스타일 없이 큰 글씨로만 쓴 DOCX 제목, XLSX 칸 수 제한, 메모·바탕쪽 읽기. 개선할 때마다 처음 보는 문서에
+  새 정답을 달아 일반화를 확인한다 (고친 문서로 잰 숫자는 좋게 나올 수밖에 없다).
 
 아래는 2026-10-16(v0.7.2) 인계 때의 기록이다.
 
