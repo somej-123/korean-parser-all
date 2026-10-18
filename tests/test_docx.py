@@ -277,3 +277,33 @@ def test_word_comments_and_replies(tmp_path):
     note = doc.notes[refs[0].note_id]
     assert note.kind == "comment" and [b.text for b in note.blocks] == ["부가세 포함인지 확인", "포함입니다"]
     assert not any("메모" in w for w in doc.warnings)
+
+
+def test_docx_moved_text_ruby_hidden_altchunk_ole(tmp_path):
+    # DOCX 점검에서 찾은 빈틈: 변경 추적의 옮긴 글(w:moveTo)과 덧말(w:ruby)의 본말이 빠졌고, 숨김 서식 글과
+    # 끼워 넣은 내용(w:altChunk), OLE 개체는 아무 표시 없이 빠졌다
+    import zipfile
+
+    body = ('<w:p><w:moveFrom w:id="1"><w:r><w:t>옮기기 전</w:t></w:r></w:moveFrom>'
+            '<w:moveTo w:id="2"><w:r><w:t>옮긴 글</w:t></w:r></w:moveTo>'
+            '<w:r><w:rPr><w:vanish/></w:rPr><w:t>숨긴 글</w:t></w:r>'
+            '<w:ruby><w:rt><w:r><w:t>한자</w:t></w:r></w:rt><w:rubyBase><w:r><w:t>漢字</w:t></w:r></w:rubyBase></w:ruby></w:p>'
+            '<w:altChunk r:id="rIdA"/><w:p><w:r><w:object><v:shape><o:OLEObject '
+            'xmlns:o="urn:schemas-microsoft-com:office:office" ProgID="Excel.Sheet.12"/></v:shape></w:object></w:r></w:p>'
+            "<w:sectPr/>")
+    path = _docx(tmp_path, body, {})
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    with zipfile.ZipFile(path) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    files["word/_rels/document.xml.rels"] = (
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f'<Relationship Id="rIdA" Type="{rel}/aFChunk" Target="chunk.html"/></Relationships>').encode()
+    files["word/chunk.html"] = "<html><body><p>끼워 넣은 문단</p><script>x()</script></body></html>".encode("utf-8")
+    with zipfile.ZipFile(path, "w") as z:
+        for n, data in files.items():
+            z.writestr(n, data)
+    doc = parse(path)
+    texts = [b.text for b in doc.blocks if isinstance(b, Paragraph)]
+    assert texts[0] == "옮긴 글漢字(한자)" and "끼워 넣은 문단" in texts
+    assert "숨김 서식 글 4자는 넣지 않음" in doc.warnings
+    assert any("OLE" in w for w in doc.warnings)

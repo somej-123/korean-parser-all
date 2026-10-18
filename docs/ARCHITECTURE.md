@@ -319,6 +319,9 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
   분수('# ?/?', 고정 분모 '?/8'은 약분하지 않음), 지수('0.00E+00'), 끝의 ','(천으로 나눔)도 따른다. 기본 회계 형식(41~44)은
   통화 기호가 지역 설정을 따라 파일에 없으므로 기호 없이 쓴다 (0은 '-').
 
+- 변경 추적: 넣은 글(w:ins)과 옮겨 온 글(w:moveTo)은 읽고, 지운 글(w:del)과 옮기기 전 자리(w:moveFrom)는 뺀다 (최종본).
+  덧말(w:ruby)은 '본말(덧말)' (한글 덧말과 같은 모양). 숨김 서식 글(w:vanish)은 넣지 않고 글자 수를 경고한다.
+  끼워 넣은 다른 형식 내용(w:altChunk)은 HTML·글 파일이면 글을 문단으로 읽고 그 밖은 경고, OLE 개체는 그림만 넣고 경고.
 - Word 메모(comments.xml)는 Note(kind="comment"), 본문의 commentReference 자리에 NoteRef. 답글은 본문 참조가 없고
   commentsExtended.xml의 paraIdParent로 부모를 가리키므로 부모 메모 안에 차례로 붙인다 (v1.4.0. 그 전에는 경고만).
 - 구형 VML 그림(w:pict)은 v:group 안에 그림과 글상자가 여럿 들어 있을 수 있다 (PDF를 DOCX로 바꾼 문서는 쪽마다 이렇다).

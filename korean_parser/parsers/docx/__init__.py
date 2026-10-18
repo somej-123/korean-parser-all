@@ -57,6 +57,7 @@ class DocxParser:
         self._note_labels: dict[tuple[str, str], str] = {}
         self._hf_seen: dict[str, set[str]] = {}  # 머리말·꼬리말 → 이미 담은 글
         self._hf_parts: set[str] = set()  # 이미 읽은 머리말·꼬리말 부분
+        self._hidden_chars = 0  # 숨김 서식(w:vanish)이라 넣지 않은 글자 수 (끝에 경고)
         self._part = "word/document.xml"
         self._rels: dict[str, tuple[str, str, bool]] = {}
         self._table_text: list[tuple[dict, dict]] = []  # 중첩 표마다 표 스타일의 (pPr, rPr)
@@ -90,6 +91,8 @@ class DocxParser:
         self._read_other_headers(body)
         self._read_notes()
         self._read_comments()
+        if self._hidden_chars:
+            self._warn(f"숨김 서식 글 {self._hidden_chars:,}자는 넣지 않음")
         self.zip.close()
         return doc
 
@@ -306,8 +309,10 @@ class DocxParser:
                     out.append(self._table(el))
             elif tag in (q("w:sdt"),):
                 out.extend(self._blocks_raw(child(el, "w:sdtContent")))
-            elif tag in (q("w:customXml"), q("w:ins"), q("w:smartTag")):
+            elif tag in (q("w:customXml"), q("w:ins"), q("w:moveTo"), q("w:smartTag")):
                 out.extend(self._blocks_raw(el))
+            elif tag == q("w:altChunk"):
+                out.extend(self._alt_chunk(el))
             elif tag == q("mc:AlternateContent"):
                 choice = el.find(q("mc:Choice"))
                 out.extend(self._blocks_raw(choice if choice is not None else el.find(q("mc:Fallback"))))
@@ -394,8 +399,18 @@ class DocxParser:
             elif tag == q("w:sdt"):
                 content = child(kid, "w:sdtContent")
                 self._walk_inlines(kid if content is None else content, para_rpr, link, out, floats, state)
-            elif tag in (q("w:ins"), q("w:smartTag"), q("w:customXml"), q("w:fldSimple"), q("w:bdo"), q("w:dir")):
+            elif tag in (q("w:ins"), q("w:moveTo"), q("w:smartTag"), q("w:customXml"), q("w:fldSimple"), q("w:bdo"),
+                         q("w:dir")):
+                # w:moveTo: 변경 추적에서 옮겨 온 글 (옮기기 전 자리 w:moveFrom은 지운 글처럼 뺀다)
                 self._walk_inlines(kid, para_rpr, link, out, floats, state)
+            elif tag == q("w:ruby"):
+                # 덧말(윗주): 본말 뒤에 괄호로 덧말. 한글 덧말과 같은 모양 (예전에는 본말까지 빠졌다)
+                base, rt = child(kid, "w:rubyBase"), child(kid, "w:rt")
+                if base is not None:
+                    self._walk_inlines(base, para_rpr, link, out, floats, state)
+                ruby = "".join(t.text or "" for t in rt.iter(q("w:t"))) if rt is not None else ""
+                if ruby.strip():
+                    out.append(Text(text=f"({ruby})", link=link))
             elif tag == q("mc:AlternateContent"):
                 choice = kid.find(q("mc:Choice"))
                 self._walk_inlines(choice if choice is not None else kid, para_rpr, link, out, floats, state)
@@ -412,6 +427,7 @@ class DocxParser:
         rstyle = wattr(child(rpr_el, "w:rStyle"), "val")
         props = {**para_rpr, **self.styles.run_style_props(rstyle), **parse_rpr(rpr_el)}
         if props.get("_hidden"):
+            self._hidden_chars += sum(len(t.text or "") for t in r.iter(q("w:t")))
             return
         diff = {k: v for k, v in props.items() if self._default_rpr.get(k) != v}
         style = to_text_style(diff)
@@ -597,6 +613,31 @@ class DocxParser:
             return None
         return Drawing(id=self._new_id(), prov=self._prov(), width_pt=w or 0, height_pt=h or 0, shapes=shapes, alt=alt)
 
+    def _alt_chunk(self, el) -> list[Block]:
+        """끼워 넣은 다른 형식 내용(w:altChunk). HTML·글 파일이면 글을 문단으로 읽고, 그 밖은 경고."""
+        rel = self._rels.get(el.get(f"{{{NS['r']}}}id") or "")
+        data = self.zip.read(rel[1]) if rel and not rel[2] and rel[1] in self.names else None
+        ext = posixpath.splitext(rel[1])[1].lower() if rel else ""
+        if data is None or ext not in (".htm", ".html", ".xhtml", ".mht", ".txt"):
+            self._warn(f"끼워 넣은 다른 형식 내용(altChunk{', ' + ext if ext else ''})은 넣지 않음")
+            return []
+        m = re.search(rb'charset=["\']?([\w-]+)', data[:4096])
+        try:
+            text = data.decode(m.group(1).decode() if m else "utf-8")
+        except (LookupError, UnicodeDecodeError):
+            text = data.decode("cp949", "replace")  # 표시가 없고 UTF-8도 아니면 한국어 윈도우 기본 인코딩
+        if ext == ".txt":
+            lines = text.splitlines()
+        else:
+            from lxml import html as lxml_html
+
+            root = lxml_html.fromstring(text)
+            for bad in root.iter("script", "style"):
+                bad.drop_tree()
+            lines = root.text_content().splitlines()
+        return [Paragraph(id=self._new_id(), prov=self._prov(), inlines=[Text(text=" ".join(ln.split()))])
+                for ln in lines if ln.strip()]
+
     def _vml(self, pict, out, floats) -> None:
         """구형 VML 그림/글상자 (w:pict, w:object).
 
@@ -605,6 +646,8 @@ class DocxParser:
         나머지 글이 경고 없이 빠졌다. 글상자 안에 든 그림·글상자는 그 글상자를 읽을 때 담기므로 여기서는 뺀다.
         """
         txbx_tag = q("w:txbxContent")
+        if any(isinstance(e.tag, str) and e.tag.endswith("}OLEObject") for e in pict.iter()):
+            self._warn("끼워 넣은 OLE 개체(다른 파일)는 그림으로만 넣음")
 
         def outer(el) -> bool:
             for a in el.iterancestors():

@@ -74,12 +74,23 @@ def norm(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _docx_dropped(t) -> bool:
+    """Word에서 화면에 없는 글: 변경 추적에서 옮기기 전 자리(w:moveFrom), 숨김 서식(글자 단위 w:vanish, 파서가 경고한다)."""
+    if any(a.tag == W + "moveFrom" for a in t.iterancestors()):
+        return True
+    run = t.getparent()
+    vanish = run.find(f"{W}rPr/{W}vanish") if run is not None else None
+    return vanish is not None and vanish.get(W + "val", "true") not in ("0", "false")
+
+
 def _xml_texts(z: zipfile.ZipFile, name: str, tag: str, skip_fallback: bool = False) -> list[str]:
     root = etree.fromstring(z.read(name))
     out = []
     for t in root.iter(tag):
         if skip_fallback and any(a.tag == MC_FALLBACK for a in t.iterancestors()):
             continue  # 호환용 사본 (같은 글상자가 Choice와 Fallback에 두 번 들어 있다)
+        if tag == W + "t" and _docx_dropped(t):
+            continue
         if t.text:
             out.append(t.text)
     return out
