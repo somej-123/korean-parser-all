@@ -230,7 +230,9 @@ class HwpxParser:
         if inlines or not (before or after):
             style = pdef.style if pdef else None
             name = style_def.name if style_def else None
-            if heading_level is not None and has_text:
+            # 글자·숫자가 없는 개요 문단('…' 자리표시)은 제목으로 내지 않는다
+            if heading_level is not None and has_text and any(
+                    isinstance(i, Text) and re.search(r"\w", i.text) for i in inlines):
                 blocks.append(Heading(id=self._new_id(), prov=self._prov(), level=heading_level, inlines=inlines,
                                       style=style, style_name=name, list_info=list_info))
             else:

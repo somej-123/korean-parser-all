@@ -307,3 +307,28 @@ def test_docx_moved_text_ruby_hidden_altchunk_ole(tmp_path):
     assert texts[0] == "옮긴 글漢字(한자)" and "끼워 넣은 문단" in texts
     assert "숨김 서식 글 4자는 넣지 않음" in doc.warnings
     assert any("OLE" in w for w in doc.warnings)
+
+
+def test_big_type_only_title_and_placeholder_heading(tmp_path):
+    # 실제 양식 DOCX: '개정 이력'은 번호·스타일 없이 20pt 굵게만 썼다. 크기가 적힌 글이 이 줄뿐이라 본문 크기가 20pt로
+    # 잡혀 못 찾았다 (크기 없는 글은 문서 기본 크기로 센다). '…'뿐인 제목 스타일 문단은 제목이 아니다
+    from docx import Document as Docx
+    from docx.shared import Pt
+
+    from korean_parser.ir import Heading, Paragraph
+
+    d = Docx()
+    run = d.add_paragraph().add_run("개정 이력")
+    run.bold, run.font.size = True, Pt(20)
+    d.add_paragraph("본문 글입니다. " * 5)
+    d.add_heading("…", level=1)
+    big_number = d.add_paragraph().add_run("2026")
+    big_number.font.size = Pt(24)
+    path = tmp_path / "big.docx"
+    d.save(path)
+    doc = parse(path)
+    first = doc.blocks[0]
+    assert isinstance(first, Paragraph) and first.heading_guess and first.heading_guess.level == 1
+    assert "큰 글씨만" in first.heading_guess.reason
+    assert not any(isinstance(b, Heading) for b in doc.blocks)  # '…' 제목 스타일 문단은 문단으로
+    assert not any(b.heading_guess for b in doc.blocks[1:] if isinstance(b, Paragraph))  # 숫자뿐인 큰 글씨는 아니다

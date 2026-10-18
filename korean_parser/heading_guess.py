@@ -20,6 +20,8 @@ DOCX·HWPX·HWP 문서는 제목 스타일·개요 번호 대신 '굵고 큰 번
 - 스타일 이름에 '제목'이 들어간 문단('내역사업 제목', '장 제목'): 문서를 만든 사람이 제목으로 정한 스타일이다. 개요 스타일이
   아닌 사용자 정의 스타일이라 파서가 Heading으로 만들지 않는다. '표 제목'·'그림 제목'처럼 캡션 스타일과 목차 스타일은 뺀다.
   같은 스타일은 같은 단계로 둔다 (스타일이 번호 모양보다 우선).
+- 번호·스타일 없이 큰 글씨로만 쓴 문단 (DOCX·HWPX·HWP): 문단의 모든 글이 본문보다 1.3배 이상이고 2pt 넘게 크다
+  ('개정 이력'을 20pt 굵게). 단계는 1로 둔다 (실제 정답 두 문서에서 모두 1단계). PDF·PPTX는 그림 속 큰 숫자('85%') 같은 줄이 많아 넣지 않는다.
 하이픈 번호('2-1.', 'Ⅱ-1.')도 점 번호와 같은 절 번호로 본다.
 사용자 정의 영역 글자(한컴 기호 글꼴)로 시작하는 문단은, 같은 문서에 바로 앞·뒤 글자로 시작하는 문단이 있으면
 (❶ ❷ ❸처럼 차례로 이어지면) 번호로 본다. 보도자료 부록의 번호 제목이 이렇게 쓰여 후보에서 빠졌다.
@@ -59,13 +61,19 @@ def _private_use(ch: str) -> bool:
 
 
 def body_size(doc: Document) -> float | None:
-    """본문 글자 크기 (최상위 문단 글자 크기의 중앙값, 글자 수 가중)."""
+    """본문 글자 크기 (최상위 문단 글자 크기의 중앙값, 글자 수 가중).
+
+    크기가 적히지 않은 글은 문서 기본 크기로 센다. 파서는 기본과 다른 크기만 글 조각에 적는다. 그래서 크기가 적힌
+    글만 세면, 큰 제목 한 줄만 크기가 적힌 문서에서 본문이 그 제목 크기가 되었다 (실제 양식 DOCX: 본문 20pt).
+    """
+    default = doc.default_text_style.size_pt
     sizes = []
     for b in doc.blocks:
         if isinstance(b, Paragraph):
             for i in b.inlines:
-                if isinstance(i, Text) and i.style is not None and i.style.size_pt:
-                    sizes += [i.style.size_pt] * min(len(i.text.strip()), 200)
+                size = (i.style.size_pt if i.style is not None else None) or default if isinstance(i, Text) else None
+                if size:
+                    sizes += [size] * min(len(i.text.strip()), 200)
     if sizes:
         return statistics.median(sizes)
     return doc.default_text_style.size_pt
@@ -88,12 +96,22 @@ class TitleFinder:
         from .ir import walk_blocks
 
         self.body_size = body_size(doc)
+        self.default_size = doc.default_text_style.size_pt
+        self.flow_format = doc.meta.source_format in ("docx", "hwpx", "hwp")  # 큰 글씨만으로 제목을 찾는 형식
         self.heading_level = 0
         self.kind_level: dict[str, int] = {}
         # 사용자 정의 영역 글자 중 '번호'로 쓰인 것: 같은 문서에 바로 앞·뒤 글자로 시작하는 문단이 있다 (❶ ❷ ❸ …)
         firsts = {ord(b.text.lstrip()[0]) for b in walk_blocks(doc.blocks)
                   if isinstance(b, Paragraph) and b.text.strip() and _private_use(b.text.lstrip()[0])}
         self.pua_numbers = {c for c in firsts if c - 1 in firsts or c + 1 in firsts}
+
+    def _big_only(self, p: Paragraph) -> bool:
+        """문단의 모든 글이 본문보다 1.3배 이상, 2pt 넘게 크다 (DOCX·HWPX·HWP만)."""
+        if not self.flow_format or not self.body_size:
+            return False
+        sizes = _big_sizes(self, p)
+        need = max(self.body_size * 1.3, self.body_size + 2)
+        return bool(sizes) and all(s is not None and s >= need for s in sizes)
 
     def heading(self, h: Heading) -> None:
         self.heading_level = h.level
@@ -132,13 +150,15 @@ class TitleFinder:
             m = (kind, marker, body[1:].strip())
         elif styled:
             level, marker, kind = 0, "", ""
+        elif self._big_only(p):  # 번호·스타일 없이 큰 글씨로만 쓴 제목
+            level, marker, kind = 0, "", "big"
         else:
             return None
         if styled:
             kind = f"style:{p.style_name}"  # 같은 제목 스타일 = 같은 단계
         if kind in _NEVER_KINDS:
             return None
-        if kind != "pua_number" and not styled and (not marker.strip() or _private_use(body[:1])):
+        if kind not in ("pua_number", "big") and not styled and (not marker.strip() or _private_use(body[:1])):
             kind = "dot"  # 보이는 번호가 없거나 기호 글꼴 문자(사용자 정의 영역)로 시작: 글머리 기호로 본다
         if _TOC_LINE.search(p.text):
             return None
@@ -147,6 +167,8 @@ class TitleFinder:
         limit = 60 if kind.startswith("decimal") else 40
         if not (2 <= len(rest) <= limit) or _TITLE_TAIL.search(rest) or ":" in rest:
             return None  # 문장, 긴 글, '사업기간 : 7개월' 같은 항목: 값 줄은 제목이 아니다
+        if kind == "big" and not re.search(r"[^\W\d_]", rest):
+            return None  # 숫자·기호뿐인 큰 글씨 ('2026', '- 1 -')
         styles = [i.style for i in p.inlines if isinstance(i, Text) and i.text.strip()]
         bold = any(s is not None and s.bold for s in styles)
         sizes = [s.size_pt for s in styles if s is not None and s.size_pt]
@@ -167,11 +189,18 @@ class TitleFinder:
             why.append("절 번호")
         if table_title and not (bold or bigger or decimal):
             why.append("바로 아래 표")
+        if kind == "big":
+            why.append("큰 글씨만")
         if bold:
             why.append("굵게")
         if bigger:
             why.append(f"{max(sizes):g}pt (본문 {self.body_size:g}pt)")
         return level, " + ".join(why), kind
+
+
+def _big_sizes(finder: "TitleFinder", p: Paragraph) -> list[float | None]:
+    return [(i.style.size_pt if i.style is not None else None) or finder.default_size
+            for i in p.inlines if isinstance(i, Text) and i.text.strip()]
 
 
 def stream(blocks, llm):
@@ -196,6 +225,8 @@ def _guess_level(kind: str, heading_level: int, ranks: dict[str, int]) -> int:
     '6.6.1'인데, 순서로 매기면 6.6.1이 2단계, 뒤의 6.7이 3단계로 뒤집혔다 (가스공사 규격표준). '1.'(num_dot)이 같은 흐름에
     추정 제목으로 나왔으면 그 단계가 점 0개다.
     """
+    if kind == "big":
+        return 1  # 큰 글씨로만 쓴 제목은 문서 단위 제목이다 ('개정 이력', 부록의 'T/T 구성품 List'): 실제 정답에서 모두 1단계
     if kind.startswith("decimal"):
         dots = int(kind[len("decimal"):]) - 1
         family = ranks.setdefault("decimal", len(ranks))

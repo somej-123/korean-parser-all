@@ -357,7 +357,9 @@ class DocxParser:
         if has_content:
             block_id = self._new_id()
             self._para_ctx[block_id] = (style_id or self.styles.default_para_style, bool(ppr.get("_contextual")))
-            if level is not None and _has_text(inlines):
+            # 글자·숫자가 없는 제목 스타일 문단('…' 자리표시)은 제목으로 내지 않는다 (실제 양식 DOCX)
+            if level is not None and _has_text(inlines) and any(
+                    isinstance(i, Text) and re.search(r"\w", i.text) for i in inlines):
                 blocks.append(Heading(id=block_id, prov=self._prov(), level=level, inlines=inlines,
                                       style=pstyle, style_name=name, list_info=list_info))
             else:
