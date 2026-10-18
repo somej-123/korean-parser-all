@@ -248,3 +248,32 @@ def test_format_comes_from_content_not_extension(tmp_path):
     broken = tmp_path / "broken.docx"
     broken.write_bytes(b"not a zip")
     assert detect_format(broken) == "docx"
+
+
+def test_word_comments_and_replies(tmp_path):
+    # Word 메모는 예전에 '넣지 않음' 경고만 남겼다. 메모 참조 자리에 NoteRef, 답글은 부모 메모 안에 붙인다
+    import zipfile
+
+    from korean_parser.ir import NoteRef
+
+    w = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' \
+        'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"'
+    body = ('<w:p><w:commentRangeStart w:id="0"/><w:r><w:t>사업 예산은 12억 원이다.</w:t></w:r><w:commentRangeEnd w:id="0"/>'
+            '<w:r><w:commentReference w:id="0"/></w:r></w:p><w:sectPr/>')
+    path = _docx(tmp_path, body, {})
+    comments = (f'<w:comments {w}><w:comment w:id="0" w:author="검토자"><w:p w14:paraId="0000000A"><w:r>'
+                '<w:t>부가세 포함인지 확인</w:t></w:r></w:p></w:comment>'
+                '<w:comment w:id="1" w:author="작성자"><w:p w14:paraId="0000000B"><w:r><w:t>포함입니다</w:t></w:r></w:p>'
+                '</w:comment></w:comments>')
+    ext = ('<w15:commentsEx xmlns:w15="http://schemas.microsoft.com/office/word/2012/wordml">'
+           '<w15:commentEx w15:paraId="0000000A"/><w15:commentEx w15:paraId="0000000B" w15:paraIdParent="0000000A"/>'
+           '</w15:commentsEx>')
+    with zipfile.ZipFile(path, "a") as z:
+        z.writestr("word/comments.xml", comments)
+        z.writestr("word/commentsExtended.xml", ext)
+    doc = parse(path)
+    refs = [i for i in doc.blocks[0].inlines if isinstance(i, NoteRef)]
+    assert [r.label for r in refs] == ["메모1"]
+    note = doc.notes[refs[0].note_id]
+    assert note.kind == "comment" and [b.text for b in note.blocks] == ["부가세 포함인지 확인", "포함입니다"]
+    assert not any("메모" in w for w in doc.warnings)

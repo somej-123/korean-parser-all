@@ -129,7 +129,7 @@ def test_real_rfp_example():
 def test_caption_memo_and_master_page(tmp_path):
     # v1.0 기준 1(빠짐없이)에서 찾은 것: 개체 캡션 글은 개체 안이 아니라 hp:caption에 있어 경고 없이 빠졌고
     # (hwpxlib SimpleRectangle '그림'), 메모(fieldBegin MEMO)와 바탕쪽의 글도 알리지 않고 빠졌다.
-    # 캡션은 개체 뒤 문단으로 읽고, 메모·바탕쪽은 v1.0에서 읽지 않는 대신 경고를 남긴다
+    # 캡션은 개체 뒤 문단으로 읽고, 바탕쪽은 읽지 않는 대신 경고를 남긴다 (메모는 v1.4.0부터 읽는다)
     import re
     import zipfile
 
@@ -155,7 +155,9 @@ def test_caption_memo_and_master_page(tmp_path):
     doc = parse(out)
     i = next(k for k, b in enumerate(doc.blocks) if isinstance(b, Table))
     assert doc.blocks[i + 1].text == "표 1. 시험 표"
-    assert "메모(한글 메모)의 글은 넣지 않음" in doc.warnings and "바탕쪽의 글은 넣지 않음" in doc.warnings
+    assert "바탕쪽의 글은 넣지 않음" in doc.warnings
+    # 메모는 v1.4.0부터 읽는다: Note(kind="comment")와 붙은 자리의 NoteRef
+    assert [n.blocks[0].text for n in doc.notes.values() if n.kind == "comment"] == ["메모 글"]
 
 
 def test_even_page_header_is_kept(tmp_path):
@@ -176,3 +178,16 @@ def test_even_page_header_is_kept(tmp_path):
             zout.writestr(item, data)
     doc = parse(out)
     assert [b.text for b in doc.header] == ["짝수 쪽 머리말", "양쪽 머리말"] or         [b.text for b in doc.header] == ["양쪽 머리말", "짝수 쪽 머리말"]
+
+
+def test_hwpx_memo_becomes_comment_note():
+    # 한글 메모(fieldBegin type="MEMO")의 글은 예전에 경고만 남겼다 (hwpxlib 표본에 메모 56개)
+    from pathlib import Path as _P
+
+    sample = _P(__file__).resolve().parents[1] / "benchmarks/corpus/samples_web/hwpxlib/error_20251107_test.hwpx"
+    if not sample.exists():
+        pytest.skip("hwpxlib 표본이 없다 (benchmarks/corpus/fetch_samples.sh)")
+    doc = parse(sample)
+    memos = [n for n in doc.notes.values() if n.kind == "comment"]
+    assert len(memos) == 56 and memos[0].blocks[0].text.startswith("★교과군명")
+    assert not any("메모" in w for w in doc.warnings)

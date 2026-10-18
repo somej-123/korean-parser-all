@@ -89,10 +89,7 @@ class DocxParser:
         self._read_section(sect)
         self._read_other_headers(body)
         self._read_notes()
-        comments = self._xml("word/comments.xml")
-        if comments is not None and len(comments):
-            # 메모는 본문이 아니다. v1.0에서는 읽지 않고 알린다 (docs/GOAL.md 'v1.0 이후')
-            self._warn(f"Word 메모 {len(comments)}개의 글은 넣지 않음")
+        self._read_comments()
         self.zip.close()
         return doc
 
@@ -224,6 +221,50 @@ class DocxParser:
                     if text and text not in seen:
                         seen.add(text)
                         getattr(self.doc, kind).extend(blocks)
+
+    def _read_comments(self) -> None:
+        """Word 메모 (word/comments.xml) → Note(kind="comment"). 본문의 메모 참조 자리에는 NoteRef가 이미 있다.
+
+        답글은 본문 참조가 없고 commentsExtended.xml(w15:commentEx)의 paraIdParent로 부모 메모를 가리킨다 → 부모 메모 안에
+        차례로 붙인다. 참조도 부모도 없는 메모는 참조 없이 메모 목록에만 넣는다 (예전에는 모두 경고만 남겼다).
+        """
+        root = self._xml("word/comments.xml")
+        if root is None:
+            return
+        self._enter_part("word/comments.xml")
+        w14 = "{http://schemas.microsoft.com/office/word/2010/wordml}paraId"
+        w15 = "{http://schemas.microsoft.com/office/word/2012/wordml}"
+        parent_of: dict[str, str] = {}  # 메모 마지막 문단 paraId → 부모 메모 마지막 문단 paraId
+        ext = self._xml("word/commentsExtended.xml")
+        for ce in ext.iter(f"{w15}commentEx") if ext is not None else []:
+            if ce.get(f"{w15}paraIdParent"):
+                parent_of[ce.get(f"{w15}paraId")] = ce.get(f"{w15}paraIdParent")
+        by_para: dict[str, str] = {}  # 마지막 문단 paraId → 메모 key
+        pending = []
+        for cm in root.findall(q("w:comment")):
+            cid = wattr(cm, "id")
+            paras = cm.findall(q("w:p"))
+            last = paras[-1].get(w14) if paras else None
+            blocks = self._blocks(cm)
+            if not blocks:
+                continue
+            label = self._note_labels.get(("comment", cid))
+            if label is not None:
+                key = f"cm{cid}"
+                self.doc.notes[key] = Note(kind="comment", label=label, blocks=blocks)
+                if last:
+                    by_para[last] = key
+            else:
+                pending.append((last, blocks))
+        for last, blocks in pending:
+            parent = by_para.get(parent_of.get(last or "", ""))
+            if parent is not None:
+                self.doc.notes[parent].blocks.extend(blocks)  # 답글
+                if last:
+                    by_para[last] = parent
+            else:
+                k = sum(1 for n in self.doc.notes.values() if n.kind == "comment") + 1
+                self.doc.notes[f"cmx{k}"] = Note(kind="comment", label=f"메모{k}", blocks=blocks)
 
     def _read_notes(self) -> None:
         for kind, part in (("footnote", "word/footnotes.xml"), ("endnote", "word/endnotes.xml")):
@@ -425,6 +466,11 @@ class DocxParser:
                     (kind, nid), str(sum(1 for k in self._note_labels if k[0] == kind) + 1)
                 )
                 out.append(NoteRef(note_id=f"{kind[0]}n{nid}", label=label))
+            elif tag == q("w:commentReference"):
+                cid = wattr(kid, "id")
+                label = self._note_labels.setdefault(
+                    ("comment", cid), f"메모{sum(1 for k in self._note_labels if k[0] == 'comment') + 1}")
+                out.append(NoteRef(note_id=f"cm{cid}", label=label))
             elif tag in (q("w:footnoteRef"), q("w:endnoteRef")):
                 continue  # 각주 본문의 번호 자리. 번호는 렌더러가 Note.label로 표시한다.
             elif tag == q("w:drawing"):

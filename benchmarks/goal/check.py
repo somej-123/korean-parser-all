@@ -5,8 +5,8 @@
     python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만 (정답 세트 평가 생략)
 
 기준 1(빠짐없이): 파일마다 원문 글자를 파서와 따로 읽어(PDF 텍스트 레이어, DOCX w:t, HWPX hp:t, HWP 문단 글 레코드,
-PPTX a:t, XLSX 글 칸) 우리 결과에 남은 비율을 잰다. 메모(한글 메모, Word comments.xml)는 v1.0에서 경고만
-남기므로 뺀다. 두 쪽 모두 같은 정규화(normalize_text, NFKC, 공백 제거)를 한다.
+PPTX a:t, XLSX 글 칸) 우리 결과에 남은 비율을 잰다. 메모(한글 메모, Word comments.xml, XLSX 칸 메모)는 v1.4.0부터
+읽으므로 원문에 넣는다. 두 쪽 모두 같은 정규화(normalize_text, NFKC, 공백 제거)를 한다.
 두 쪽(슬라이드) 이상, 절반 넘게 되풀이되는 줄은 한 번만 세고, 숫자만 있는 짧은 줄(쪽 번호)은 뺀다 (파서가 일부러 한 번만 남기거나 버린다).
 보존율이 0.99 미만인데 경고가 없으면 '경고 없이 사라진 글'로 표시한다.
 
@@ -74,19 +74,12 @@ def norm(text: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _is_memo(el) -> bool:
-    """한글 메모(fieldBegin type=MEMO) 안의 글인가. 메모는 v1.0에서 읽지 않고 경고만 남기므로 원문 글자에서 뺀다."""
-    return any(etree.QName(a).localname == "fieldBegin" and a.get("type") == "MEMO" for a in el.iterancestors())
-
-
 def _xml_texts(z: zipfile.ZipFile, name: str, tag: str, skip_fallback: bool = False) -> list[str]:
     root = etree.fromstring(z.read(name))
     out = []
     for t in root.iter(tag):
         if skip_fallback and any(a.tag == MC_FALLBACK for a in t.iterancestors()):
             continue  # 호환용 사본 (같은 글상자가 Choice와 Fallback에 두 번 들어 있다)
-        if _is_memo(t):
-            continue
         if t.text:
             out.append(t.text)
     return out
@@ -120,7 +113,7 @@ def source_pages(path: Path) -> list[list[str]] | None:
             return _pdf_pages(path)
     with zipfile.ZipFile(path) if ext in (".docx", ".hwpx", ".pptx", ".xlsx") else _NoZip() as z:
         if ext == ".docx":
-            names = [n for n in z.namelist() if re.match(r"word/(document|header\d*|footer\d*|footnotes|endnotes)\.xml$", n)]
+            names = [n for n in z.namelist() if re.match(r"word/(document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml$", n)]
             return [[t for n in names for t in _xml_texts(z, n, W + "t", skip_fallback=True)]]
         if ext == ".hwpx":
             names = sorted(n for n in z.namelist() if re.match(r"Contents/section\d+\.xml$", n))

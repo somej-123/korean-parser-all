@@ -345,8 +345,15 @@ class HwpxParser:
                 url = (cmd or "").replace("\\:", ":").replace("\\\\", "\\").split(";")[0].strip()
                 state["link"] = url or None
             elif name == "fieldBegin" and c.get("type") == "MEMO":
-                # 메모(한글 메모)는 본문이 아니다. v1.0에서는 읽지 않고 알린다 (docs/GOAL.md 'v1.0 이후')
-                self._warn("메모(한글 메모)의 글은 넣지 않음")
+                # 한글 메모: 필드 안의 subList가 메모 글이다. 본문이 아니므로 Note(kind="comment")로 두고 메모가 붙은
+                # 자리에 NoteRef (XLSX 칸 메모와 같은 모양. v1.0에서는 경고만 남겼다)
+                sub = kid(c, "subList")
+                blocks = self._paragraphs(sub) if sub is not None else []
+                if blocks:
+                    k = sum(1 for n in self.doc.notes.values() if n.kind == "comment") + 1
+                    key, label = f"cm{k}", f"메모{k}"
+                    self.doc.notes[key] = Note(kind="comment", label=label, blocks=blocks)
+                    inlines.append(NoteRef(note_id=key, label=label))
             elif name == "fieldEnd":
                 state["link"] = None
             elif name in ("header", "footer"):
