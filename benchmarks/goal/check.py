@@ -66,7 +66,9 @@ _PAGE_NO = re.compile(r"^[\d\s\-–/|·.()]{1,12}$")
 
 
 def norm(text: str) -> str:
-    return "".join(unicodedata.normalize("NFKC", normalize_text(text)).split())
+    # U+F020은 기호 글꼴(Wingdings·Symbol)의 띄어쓰기다. 파서는 공백으로 바꾸므로 원문에서도 공백으로 본다
+    # (강원랜드 보고서: 제목 앞 Wingdings 공백 417개가 빠진 글자로 세어져 0.992)
+    return "".join(unicodedata.normalize("NFKC", normalize_text(text.replace("\uf020", " "))).split())
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +127,18 @@ def source_pages(path: Path) -> list[list[str]] | None:
     with zipfile.ZipFile(path) if ext in (".docx", ".hwpx", ".pptx", ".xlsx") else _NoZip() as z:
         if ext == ".docx":
             names = [n for n in z.namelist() if re.match(r"word/(document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml$", n)]
-            return [[t for n in names for t in _xml_texts(z, n, W + "t", skip_fallback=True)]]
+            # 머리말·꼬리말 파일(첫 쪽·짝수 쪽·기본)에 같은 글이 되풀이되면 한 번만 센다. 파서도 같은 머리말은 한 번 담는다
+            # (기준 1의 '일부러 버리는 것'). 예전에는 세 번 세어 강원랜드 보고서가 0.991이 되었다
+            out, seen = [], set()
+            for n in names:
+                hf = re.match(r"word/(header|footer)", n) is not None
+                for t in _xml_texts(z, n, W + "t", skip_fallback=True):
+                    if hf and norm(t) in seen:
+                        continue
+                    if hf:
+                        seen.add(norm(t))
+                    out.append(t)
+            return [out]
         if ext == ".hwpx":
             names = sorted(n for n in z.namelist() if re.match(r"Contents/(section|masterpage)\d+\.xml$", n))
             hp = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"

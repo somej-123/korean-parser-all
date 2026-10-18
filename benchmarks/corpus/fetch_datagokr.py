@@ -115,7 +115,10 @@ def main() -> int:
     p.add_argument("--skip", type=pathlib.Path, action="append", default=[],
                    help="이 sources.json에 있는 데이터는 받지 않는다 (처음 보는 문서 묶음을 따로 만들 때)")
     p.add_argument("--first-page", type=int, default=1, help="목록의 몇 번째 쪽부터 고를지 (한 쪽 40개)")
+    p.add_argument("--want", action="append", default=[], metavar="EXT=N",
+                   help="이 형식만 이만큼 받는다 (예: --want DOCX=20). 없으면 기본 개수 (WANT)")
     args = p.parse_args()
+    want_map = {k.upper(): int(v) for k, v in (w.split("=") for w in args.want)} or WANT
     s = requests.Session()
     s.headers["User-Agent"] = "Mozilla/5.0 (korean-parser-all test collection)"
     s.headers["Referer"] = BASE + "/tcs/dss/selectDataSetList.do"
@@ -125,7 +128,7 @@ def main() -> int:
     for other in args.skip:
         done |= {x["pk"] for x in json.loads(other.read_text(encoding="utf-8"))}
     stopped = False
-    for ext, want in WANT.items():
+    for ext, want in want_map.items():
         if stopped:
             break
         rows = listing(s, ext, first=args.first_page)
