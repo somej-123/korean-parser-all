@@ -32,9 +32,9 @@ WANT = {"HWPX": 12, "DOCX": 12, "PDF": 12, "PPTX": 8, "XLSX": 6, "HWP": 4}
 DOC_EXT = {".hwp", ".hwpx", ".docx", ".pdf", ".pptx", ".xlsx"}
 
 
-def listing(s: requests.Session, ext: str, pages: int = 2) -> list[dict]:
+def listing(s: requests.Session, ext: str, pages: int = 2, first: int = 1) -> list[dict]:
     out = []
-    for n in range(1, pages + 1):
+    for n in range(first, first + pages):
         r = s.get(BASE + "/tcs/dss/selectDataSetList.do",
                   params={"dType": "FILE", "extsn": ext, "perPage": 40, "currentPage": n}, timeout=60)
         r.raise_for_status()
@@ -112,6 +112,9 @@ def unzip_docs(z: pathlib.Path) -> int:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--out", type=pathlib.Path, required=True)
+    p.add_argument("--skip", type=pathlib.Path, action="append", default=[],
+                   help="이 sources.json에 있는 데이터는 받지 않는다 (처음 보는 문서 묶음을 따로 만들 때)")
+    p.add_argument("--first-page", type=int, default=1, help="목록의 몇 번째 쪽부터 고를지 (한 쪽 40개)")
     args = p.parse_args()
     s = requests.Session()
     s.headers["User-Agent"] = "Mozilla/5.0 (korean-parser-all test collection)"
@@ -119,11 +122,13 @@ def main() -> int:
     log_path = args.out / "sources.json"
     log = json.loads(log_path.read_text(encoding="utf-8")) if log_path.exists() else []
     done = {x["pk"] for x in log}
+    for other in args.skip:
+        done |= {x["pk"] for x in json.loads(other.read_text(encoding="utf-8"))}
     stopped = False
     for ext, want in WANT.items():
         if stopped:
             break
-        rows = listing(s, ext)
+        rows = listing(s, ext, first=args.first_page)
         first, rest, seen = [], [], set()
         for r in rows:
             (rest if r["org"] in seen else first).append(r)
