@@ -1,6 +1,6 @@
 """한국어 문서 파서: 통합 문서 모델, 후처리 없는 HTML, LLM용 텍스트, 한국어 처리."""
 
-__version__ = "1.4.0"
+__version__ = "1.4.1"
 
 from .normalize import TextHealth, inspect_text, normalize_text
 from .outline import OutlineItem, detect_outline, outline_to_markdown
