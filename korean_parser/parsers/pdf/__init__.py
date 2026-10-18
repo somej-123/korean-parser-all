@@ -482,8 +482,9 @@ class PdfParser:
         from .ocr_spacing import cells_gaps, space_threshold
 
         # 공백으로 보는 빈칸 폭은 글꼴마다 다르다: 문서 전체 OCR 줄의 빈칸 폭 분포로 정한다
-        self._ocr_gap = space_threshold([g for n, cl in clusters.items() for _, cells in cl
-                                         for g in cells_gaps(self._page_image(n), cells)])
+        # (Docling의 영역들은 같은 OCR 상자를 겹쳐 담으므로 쪽마다 한 번씩만 잰다)
+        unique = {n: list({c.box: c for _, cells in cl for c in cells}.values()) for n, cl in clusters.items()}
+        self._ocr_gap = space_threshold([g for n, cells in unique.items() for g in cells_gaps(self._page_image(n), cells)])
 
         def respaced(n: int, cells) -> str:
             lines = self._ocr_lines(n, cells)

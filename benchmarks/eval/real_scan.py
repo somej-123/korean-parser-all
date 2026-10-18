@@ -8,9 +8,12 @@
 - clean: 200dpi 컬러 (깨끗한 스캔)
 - rough: 150dpi 흑백, 0.5도 기울임, JPEG 품질 60 (복사기로 뜬 흔한 스캔)
 
-목차 점선('·····')은 양쪽에서 뺀다. 표는 칸 글을 차례로 이어 비교한다.
+목차 점선('·····')은 양쪽에서 뺀다. 표는 칸 글을 차례로 이어 비교한다. 머리말·꼬리말로 알아본 글도 예측에 넣는다.
 지표: 글자 오류율(CER, 공백 빼고 순서대로 편집 거리), 글자 재현율(순서를 보지 않고 정답 글자 중 찾은 비율 — 표·단이
 많은 쪽은 글자 층의 순서가 화면 순서와 달라 CER이 실제보다 나빠진다), 어절 F1. 원본 글은 보고서에 넣지 않는다.
+
+어절 F1은 정답 쪽에서 알 수 없는 띄어쓰기를 뺀다: 글자 층에서 한글과 한글 사이에 줄이 바뀐 자리는 낱말 중간에서
+줄을 나눈 것('안전경영책 / 임보고서')인지 낱말 사이인지 글자 층만으로는 알 수 없다. 그 자리는 예측과 같게 둔다.
 """
 
 from __future__ import annotations
@@ -68,6 +71,48 @@ def make_scan(pdf_path: Path, pages, out: Path, rough: bool) -> None:
     images[0].save(out, "PDF", resolution=150 if rough else 200, save_all=True, append_images=images[1:])
 
 
+def _nospace(text: str) -> tuple[str, set[int], set[int]]:
+    """공백 뺀 글자열, 공백이 앞에 있던 글자 위치, 그중 줄바꿈만 있던(공백 글자 없이) 위치."""
+    chars: list[str] = []
+    bounds: set[int] = set()
+    breaks: set[int] = set()
+    space = newline = False
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    for ch in "\n".join(norm(line) for line in lines):
+        if ch == "\n":
+            newline = True
+        elif ch.isspace():
+            space = True
+        else:
+            if chars and (space or newline):
+                bounds.add(len(chars))
+                if newline and not space:
+                    breaks.add(len(chars))
+            space = newline = False
+            chars.append(ch)
+    return "".join(chars), bounds, breaks
+
+
+def resolve_breaks(truth: str, pred: str) -> str:
+    """정답에서 한글-한글 사이 줄바꿈 자리를 예측과 같게 정한 글 (위 설명 참고). 예측과 글자가 맞지 않는 곳은 띄운다."""
+    from rapidfuzz.distance import Levenshtein
+
+    t, tb, breaks = _nospace(truth)
+    p, pb, _ = _nospace(pred)
+    to_pred: dict[int, int] = {}
+    for op in Levenshtein.opcodes(t, p):
+        if op.tag == "equal":
+            for k in range(op.src_end - op.src_start):
+                to_pred[op.src_start + k] = op.dest_start + k
+    keep = set(tb)
+    for i in breaks:
+        if not ("가" <= t[i - 1] <= "힣" and "가" <= t[i] <= "힣"):
+            continue
+        if i in to_pred and i - 1 in to_pred and to_pred[i] == to_pred[i - 1] + 1 and to_pred[i] not in pb:
+            keep.discard(i)
+    return "".join((" " if i in keep else "") + ch for i, ch in enumerate(t))
+
+
 def char_recall(truth: str, pred: str) -> float:
     t = collections.Counter(norm(truth).replace(" ", ""))
     p = collections.Counter(norm(pred).replace(" ", ""))
@@ -101,9 +146,12 @@ def main() -> int:
                 t0 = time.perf_counter()
                 doc = parse(scan)
                 sec = time.perf_counter() - t0
-            pred = clean(full_text(from_ir(doc)))
+            # 정답(글자 층 전체)에는 머리말·꼬리말도 들어 있다. 파서가 반복 머리말로 알아본 글도 예측에 넣는다
+            furniture = " ".join(getattr(b, "text", "") or "" for b in doc.header + doc.footer)
+            pred = clean(full_text(from_ir(doc)) + " " + furniture)
             tb, pb = [{"type": "paragraph", "text": truth}], [{"type": "paragraph", "text": pred}]
-            row = (src.name[:40], kind, len(pages), cer(tb, pb), char_recall(truth, pred), eojeol_f1(tb, pb), sec)
+            eb = [{"type": "paragraph", "text": resolve_breaks(truth, pred)}]
+            row = (src.name[:40], kind, len(pages), cer(tb, pb), char_recall(truth, pred), eojeol_f1(eb, pb), sec)
             rows.append(row)
             print(*row[:2], *(f"{v:.3f}" for v in row[3:6]), f"{sec:.0f}s", flush=True)
     lines = ["# 실제 PDF로 만든 스캔본의 OCR 품질", "",

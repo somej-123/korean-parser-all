@@ -75,7 +75,7 @@ def download(s: requests.Session, row: dict, folder: pathlib.Path) -> pathlib.Pa
         except (UnicodeEncodeError, UnicodeDecodeError):
             pass
         folder.mkdir(parents=True, exist_ok=True)
-        path = folder / (pk + "_" + re.sub(r'[\\/:*?"<>|]', "_", fn))
+        path = folder / (pk + "_" + re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", fn))  # 이름에 탭이 든 것도 있다
         size = 0
         with open(path, "wb") as f:
             for chunk in resp.iter_content(1 << 16):
@@ -104,7 +104,7 @@ def unzip_docs(z: pathlib.Path) -> int:
             if info.is_dir() or pathlib.Path(name).suffix.lower() not in DOC_EXT or info.file_size > LIMIT:
                 continue
             out.mkdir(exist_ok=True)
-            (out / re.sub(r'[\\/:*?"<>|]', "_", name)).write_bytes(zf.read(info))
+            (out / re.sub(r'[\\/:*?"<>|\x00-\x1f]', "_", name)).write_bytes(zf.read(info))
             n += 1
     return n
 

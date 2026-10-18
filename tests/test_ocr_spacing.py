@@ -159,3 +159,132 @@ def test_scan_rules_keep_cell_borders_not_glyph_strokes():
     assert sorted(round(r.pos) for r in rules if r.axis == "v") == [20, 160, 300]
     grid = build_grid(rules, (20, 20, 300, 80))
     assert (grid.n_rows, grid.n_cols) == (2, 2)
+
+
+def _dot(size: float = 0.15) -> np.ndarray:
+    """점 하나 (가운데 높이, 가로·세로 size em)."""
+    px = max(2, int(size * EM))
+    blob = _blank(px)
+    top = PAD + EM // 2 - px // 2
+    blob[top:top + px, :] = True
+    return blob
+
+
+def _leader(length_em: float = 4.0) -> np.ndarray:
+    parts = []
+    for _ in range(int(length_em / 0.5)):
+        parts += [_dot(), _blank(int(0.35 * EM))]
+    return np.hstack(parts)
+
+
+def test_space_threshold_follows_gothic_gaps():
+    # 공공기관 고딕 문서: 낱말 안 빈칸 0.05~0.2em, 공백 0.27~0.42em. 예전 하한 0.3em으로는 공백을 대부분 놓쳤다
+    from korean_parser.parsers.pdf.ocr_spacing import space_threshold
+
+    gaps = [0.05 + 0.15 * i / 99 for i in range(100)] + [0.27 + 0.15 * i / 29 for i in range(30)] + [0.9, 1.1, 2.5]
+    assert 0.2 <= space_threshold(gaps) <= 0.27
+    # 바탕체 합성 문서처럼 낱말 안이 0.38em까지 벌어지면 기준도 올라간다
+    gaps = [0.1 + 0.28 * i / 99 for i in range(100)] + [0.46 + 0.3 * i / 29 for i in range(30)]
+    assert 0.38 <= space_threshold(gaps) <= 0.46
+
+
+@pytest.mark.parametrize("ocr_text, want", [("사망재해분석결과…13", "사망재해 분석결과 … 13"),
+                                             ("사망재해분석결과13", "사망재해 분석결과 13")])
+def test_toc_leader_is_set_aside(ocr_text, want):
+    # 목차 점선: 그림의 점 수십 개와 OCR의 '…'(또는 없음)이 맞지 않아 줄 전체를 형태소 분석에 넘기고 있었다
+    img = np.hstack([_line("사망재해 분석결과"), _blank(int(0.4 * EM)), _leader(), _line("13")])
+    assert respace_line(img, ocr_text, H) == want
+
+
+def test_trailing_dot_segment_left_empty():
+    # 줄 끝에 남은 점 하나(점선의 일부)는 OCR 글에 없으면 비워 둔다. 예전에는 글자를 그 점에 나눠 담아 '안전관 리대 상'
+    img = np.hstack([_line("안전관리 대상 사업"), _blank(int(0.6 * EM)), _dot()])
+    assert respace_line(img, "안전관리대상사업", H) == "안전관리 대상 사업"
+
+
+def test_middle_dot_stays_attached():
+    # 가운뎃점 둘레는 여백이 넓어 섞인 자리 기준(0.6배)을 넘지만, 앞뒤 낱말에 붙여 쓴다
+    img = np.hstack([_line("대내"), _blank(int(0.3 * EM)), _glyph("·"), _blank(int(0.3 * EM)), _line("외 안전경영")])
+    assert respace_line(img, "대내·외안전경영", H) == "대내·외 안전경영"
+
+
+def test_open_paren_needs_full_space():
+    # 여는 괄호 앞은 괄호의 왼쪽 여백 때문에 넓어 보인다. 섞인 자리의 낮은 기준을 쓰면 '방문취업 (H-2)'
+    img = np.hstack([_line("방문취업"), _blank(int(0.3 * EM)), _line("(H-2) 자격")])
+    assert respace_line(img, "방문취업(H-2)자격", H) == "방문취업(H-2) 자격"
+
+
+def test_digits_need_wide_gap():
+    # 고딕 문서는 공백 기준이 0.25em 안팎인데 숫자 '1' 옆은 0.35em까지 빈다 → 숫자 옆은 0.5em 넘어야 띄운다
+    parts = []
+    for ch in "전-예-":
+        parts += [_glyph(ch), _blank(int(0.1 * EM))]
+    parts += [_blank(int(0.25 * EM)), _glyph("1"), _blank(int(0.35 * EM)), _glyph("2")]
+    assert respace_line(np.hstack(parts), "전-예-12", H, space_gap=0.25) == "전-예-12"
+
+
+def test_light_gray_text_uses_local_contrast():
+    # 연한 회색 제목(밝기 186~193, 바탕 250)은 잉크 기준(160)에 걸리지 않아 그림으로 띄우지 못했다
+    from korean_parser.parsers.pdf.ocr_spacing import SCALE, PageImage
+
+    spaced = "2026년도 교육훈련계획"
+    img = _line(spaced)
+    page = PageImage.__new__(PageImage)
+    page.gray = np.where(img, 190, 250).astype(np.uint8)
+    page.ink = page.gray < 160
+    box = (0, 0, img.shape[1] / SCALE, img.shape[0] / SCALE)
+    assert respace_line(page.crop(box), _ocr(spaced), H) == spaced
+
+
+def test_ink_between_ocr_boxes_is_ignored():
+    # 줄이 표의 두 칸에 걸치면 칸 사이 세로 괘선 조각이 글자 조각으로 잡혔다 → 상자 사이 잉크는 지운다
+    from korean_parser.parsers.pdf.ocr_spacing import SCALE, _between_boxes_cleared
+
+    left, right = _line("구분"), _line("제품 기준")
+    bar = _blank(int(2.0 * EM))
+    bar[PAD - 2:PAD + EM - 4, EM:EM + 3] = True  # 위아래가 끊긴 괘선 (괘선으로 지워지지 않음)
+    img = np.hstack([left, bar, right])
+    w0, w1 = left.shape[1] / SCALE, (left.shape[1] + bar.shape[1]) / SCALE
+    line = [OcrCell("구분", (0, 0, w0, H / SCALE)), OcrCell("제품기준", (w1, 0, img.shape[1] / SCALE, H / SCALE))]
+    assert respace_line(img, "구분제품기준", H) != "구분 제품 기준"
+    cleared = _between_boxes_cleared(img, line, (0, 0, img.shape[1] / SCALE, H / SCALE))
+    assert respace_line(cleared, "구분제품기준", H) == "구분 제품 기준"
+
+
+def test_unread_icon_at_line_start():
+    # 줄 맨 앞의 그림 기호(체크 표시)를 OCR이 읽지 않았다. 예전에는 첫 글자를 기호에 짝지어 '오 시는 길'
+    icon = _blank(int(0.9 * EM))
+    icon[PAD:PAD + EM - 4, 2:-2] = True
+    yy, xx = np.mgrid[0:icon.shape[0], 0:icon.shape[1]]
+    icon[(np.abs(yy - PAD - xx) < 3) | (np.abs(yy - PAD - (icon.shape[1] - xx)) < 3)] = False  # 속에 흰 무늬
+    assert bullet_shape(icon, EM) is None  # 개조식 기호 모양이 아니다
+    img = np.hstack([icon, _blank(int(0.6 * EM)), _line("오시는 길")])
+    assert respace_line(img, "오시는길", H) == "오시는 길"
+
+
+def test_white_text_on_dark_band():
+    # 어두운 띠 위의 흰 글자: 상자의 절반 넘게 잉크이면 밝은 화소를 글자로 본다
+    from korean_parser.parsers.pdf.ocr_spacing import SCALE, PageImage
+
+    spaced = "이용 프로세스"
+    strokes = _line(spaced)
+    strokes[:, ::3] = False  # 글자 획은 가늘다 (상자의 대부분은 띠 색)
+    strokes[PAD + 4:PAD + EM - 4, :] &= np.arange(strokes.shape[1]) % 3 == 1
+    page = PageImage.__new__(PageImage)
+    page.gray = np.where(strokes, 255, 60).astype(np.uint8)
+    page.ink = page.gray < 160
+    box = (0, 0, strokes.shape[1] / SCALE, strokes.shape[0] / SCALE)
+    assert page.crop(box).mean() < 0.5
+    assert respace_line(page.crop(box), _ocr(spaced), H) == spaced
+
+
+@pytest.mark.parametrize("ocr_text", ["0액화석유가스의안전관리", "O액화석유가스의안전관리"])
+def test_bullet_misread_as_digit_keeps_its_segment(ocr_text):
+    # 'ㅇ' 기호를 OCR이 '0'·'O'로 읽었다. 기호 모양으로는 알아보지 못해도 그 조각에 짝지어야 뒤 낱말이 밀리지 않는다
+    bullet = _blank(int(0.95 * EM))
+    bullet[PAD + 4:PAD + EM - 4, 3:-3] = True
+    bullet[PAD + 8:PAD + EM - 8, 7:-7] = False
+    bullet[PAD + 4:PAD + 6, :] = False  # 위가 트인 모양 (□로 보지 않게)
+    img = np.hstack([bullet, _blank(int(1.0 * EM)), _line("액화석유가스의 안전관리")])
+    got = respace_line(img, ocr_text, H)
+    assert got.endswith(" 액화석유가스의 안전관리")

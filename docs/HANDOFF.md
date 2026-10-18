@@ -14,7 +14,7 @@ HWP·HWPX(바탕쪽·숨은 설명·캡션 자동 번호), PDF(□ 줄과 '< …
 | v1.0 기준 1·2·3 | `python benchmarks/goal/check.py --out goal_report.md` | 파일 368개 통과(예외 0), 지표 11개, 요소 113개 |
 | 다른 파서 6개와 비교 | `benchmarks/compare/README.md` | 글 보존율·합성 정답 세트에서 가장 높음 (XLSX 초대형 시트만 낮음) |
 | 실제 문서 구조 정답 | `benchmarks/real_truth/README.md` | 처음 정답 6개: 제목 1.000/0.961, 표 0.993. 처음 보는 6개: 제목 1.000/0.875, 표 0.991 |
-| 실제 PDF로 만든 스캔본 | `benchmarks/eval/real_scan.py` (README '실제 PDF로 만든 스캔본') | 글자 재현율 0.952(깨끗)·0.945(거침), 어절 F1 0.753·0.690 |
+| 실제 PDF로 만든 스캔본 | `benchmarks/eval/real_scan.py` (README '실제 PDF로 만든 스캔본') | 글자 재현율 0.952(깨끗)·0.945(거침), 어절 F1 0.845·0.834 (띄어쓰기 고치기 전 0.758·0.694) |
 
 - 실제 문서 모으기: `benchmarks/corpus/fetch_datagokr.py` (공공데이터포털, 받은 파일과 정답 파일은 `samples_rfp/`에만)
 - 정답을 새로 달면 `benchmarks/real_truth/check_truth.py`로 옮겨 적은 실수(원본에 없는 글, 맞물리지 않는 표 격자)를 먼저 찾는다.
@@ -23,7 +23,9 @@ HWP·HWPX(바탕쪽·숨은 설명·캡션 자동 번호), PDF(□ 줄과 '< …
 - 스캔본에서 글이 빠지면 알 수 있다 (v1.4.1 뒤): 파서가 쪽마다 OCR 글자와 블록 글자를 세어 20% 넘게 빠진 쪽을 경고하고
   (`_check_ocr_coverage`), 기준 1이 실제 PDF 7개로 만든 스캔본의 글자 재현율(0.95 이상)을 잰다 (`check.py --no-scan`으로 뺄 수 있다).
 - PDF 끝의 서명 줄('… 계약담당관')은 쪽의 마지막 글이면 문단으로 되돌린다 (v1.4.1 뒤, `_signature_line`).
-- 다음에 하면 좋은 일: 실제 스캔본의 띄어쓰기(어절 F1 0.69~0.75, 합성 스캔 0.955보다 낮다).
+- 실제 스캔본의 띄어쓰기를 고쳤다 (2026-10-18, ARCHITECTURE의 'OCR 띄어쓰기', `benchmarks/eval/README.md`의 '띄어쓰기 고침').
+  남은 틀린 어절은 대부분 OCR 글자 오류(정답 어절의 15%)다. 처음 보는 문서 묶음: `samples_rfp/datagokr_scan`, `datagokr_scan2`.
+- 다음에 하면 좋은 일: OCR이 전각 괄호 '【】'를 '['·')'로 읽은 줄의 띄어쓰기.
   HWP(바이너리) 메모는 rhwp의 aift.hwp 표본으로 확인해 읽는다 (v1.4.1 뒤). 개선할 때마다 처음 보는 문서에 새 정답을
   달아 일반화를 확인한다 (고친 문서로 잰 숫자는 좋게 나올 수밖에 없다).
 

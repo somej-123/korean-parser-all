@@ -6,10 +6,10 @@ OCR(RapidOCR 한국어 모델)은 줄 안의 공백을 대부분 빠뜨린다 ('
 
 1. 줄 그림을 흑백으로 바꾸고 표 괘선(줄 전체를 가로지르는 잉크)을 지운다.
 2. 빈칸 폭이 글자 높이(em)의 일정 배수 이상이면 공백이다. 한 낱말 안의 빈칸(받침과 모음 사이 등)은 이보다 좁다.
-   이 기준은 글꼴마다 다르므로(바탕 0.42, 고딕 0.33 안팎) 문서 전체 빈칸 폭의 분포에서 두 무리(낱말 안 / 낱말 사이)를
-   가르는 값으로 정한다 (`space_threshold`).
+   이 기준은 글꼴마다 다르므로(바탕 0.4 안팎, 공공기관 문서의 고딕 0.2~0.3) 문서 전체 빈칸 폭의 분포에서 두 무리
+   (낱말 안 / 낱말 사이)를 가르는 값으로 정한다 (`space_threshold`).
 3. 공백으로 나뉜 조각들의 폭과 OCR 글자의 예상 폭(한글 1em, 숫자 0.5em …)을 맞춰, 각 공백이 들어갈 글자 위치를
-   정한다 (동적 계획법).
+   정한다 (동적 계획법). 목차 점선(····)은 그림과 OCR 글 양쪽에서 떼어 놓고 맞춘다.
 4. 줄 맨 앞의 1em 크기 조각이 개조식 기호 모양(□ ○ ■ ● -)이면 그 기호를 되살린다. OCR은 이런 기호를 빠뜨리거나
    'O'·'0'·'ㅇ'·'ㅁ'으로 읽는다.
 
@@ -19,6 +19,7 @@ OCR(RapidOCR 한국어 모델)은 줄 안의 공백을 대부분 빠뜨린다 ('
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 import numpy as np
@@ -39,11 +40,17 @@ class OcrCell:
     box: tuple[float, float, float, float]
 
 
+_WIDE_PUNCT = "□■◇◆▣○●◦◎❍※【】「」『』〈〉《》〔〕"
+_LOOSE = set("()[]{}<>【】「」『』〈〉《》〔〕'\"‘’“”·ㆍ・‧∙•")  # 글꼴마다 폭이 크게 다르거나 OCR이 전각·반각을 바꿔 읽는 글자
+_DOTS = set("·ㆍ・‧∙")  # 가운뎃점: 앞뒤 낱말에 붙여 쓴다
+_OPEN = set("([{<【「『〈《〔")
+
+
 def char_width(ch: str) -> float:
     """글자의 대략적인 폭 (em). 한글·한자·기호는 정사각형, 숫자·영문은 절반 정도."""
     if "가" <= ch <= "힣" or "㄰" <= ch <= "㆏" or "一" <= ch <= "鿿":
         return 1.0
-    if ch in "□■◇◆▣○●◦◎❍※":
+    if ch in _WIDE_PUNCT or "　" <= ch <= "〿" or "！" <= ch <= "｠":
         return 1.0
     if ch in ".,:;'`|!":
         return 0.28
@@ -51,6 +58,10 @@ def char_width(ch: str) -> float:
         return 0.36
     if ch in "%&@WMmw":
         return 0.85
+    if ch in "iIjlft":  # 좁은 영문 ('PIC'의 I를 0.66으로 보면 'OP IChardwa re'처럼 밀렸다)
+        return 0.3
+    if ch == "r":
+        return 0.38
     if ch.isupper():
         return 0.66
     if ch.isdigit():
@@ -60,17 +71,47 @@ def char_width(ch: str) -> float:
     return 0.5
 
 
+def width_spread(ch: str) -> float:
+    """char_width가 실제 폭과 얼마나 어긋날 수 있는가 (em). 한글은 거의 정확하고, 괄호·따옴표·가운뎃점은 글꼴과
+    OCR(전각 '【'을 반각 '['로 읽는 등)에 따라 0.5em 넘게 틀린다. 조각과 글자를 맞출 때 어긋남을 이런 글자 쪽에 둔다."""
+    if "가" <= ch <= "힣":
+        return 0.1
+    if ch in _LOOSE:
+        return 0.45
+    if ch.isdigit():
+        return 0.12
+    if ch.isascii() and ch.isalpha():
+        return 0.15
+    return 0.3
+
+
 class PageImage:
     """스캔 쪽 한 장의 흑백 그림 (잉크 여부)."""
 
     def __init__(self, pdf_page):
         gray = pdf_page.render(scale=SCALE, grayscale=True).to_pil().convert("L")
-        self.ink = np.asarray(gray) < INK
+        self.gray = np.asarray(gray)
+        self.ink = self.gray < INK
 
     def crop(self, box) -> np.ndarray:
+        """상자 안의 잉크 (글자 화소).
+
+        - 어두운 띠 위의 흰 글자('이용 프로세스' 제목 띠): 상자의 절반 넘게 잉크다. 밝은 화소를 글자로 본다.
+          보통 글 줄은 굵은 제목도 잉크가 35%를 넘지 않는다.
+        - 연한 색 글자(밝기 160 넘음)만 있어 잉크가 거의 없으면, 상자 안의 가장 어두운 쪽과 바탕 밝기의 가운데를
+          기준으로 다시 정한다 (회색 제목 '2026년도 교육훈련계획': 글자 186~193, 바탕 250).
+        """
         l, t, r, b = (int(round(v * SCALE)) for v in box)
         h, w = self.ink.shape
-        return self.ink[max(t, 0):min(b, h), max(l, 0):min(r, w)]
+        ink = self.ink[max(t, 0):min(b, h), max(l, 0):min(r, w)]
+        if ink.size and ink.mean() > 0.55:
+            return ~ink
+        if ink.size and ink.mean() < 0.005:
+            gray = self.gray[max(t, 0):min(b, h), max(l, 0):min(r, w)]
+            dark, paper = np.percentile(gray, 2), np.percentile(gray, 90)
+            if paper - dark >= 40:
+                return gray < (dark + paper) / 2
+        return ink
 
 
 def _strip_rules(mask: np.ndarray) -> np.ndarray:
@@ -111,13 +152,15 @@ def line_gaps(mask: np.ndarray, box_h_px: float) -> list[float]:
 def space_threshold(gaps: list[float]) -> float:
     """빈칸 폭 분포를 두 무리(낱말 안 / 낱말 사이)로 가르는 값 (오츠 방법). 표본이 적으면 SPACE_GAP.
 
-    0.1~1.2em 사이의 빈칸만 본다 (더 넓은 것은 칸·단 사이). 결과는 0.3~0.45em으로 묶는다.
+    0.1~0.8em 사이의 빈칸만 본다. 더 넓은 빈칸(칸·단 사이, 문장 끝)이 섞이면 가르는 값이 위로 끌려 올라간다.
+    결과는 0.2~0.45em으로 묶는다. 공공기관 문서의 고딕은 낱말 안 빈칸이 0.22em 이하, 공백이 0.25~0.45em이라
+    예전 하한(0.3)으로는 공백을 대부분 놓쳤다 (실제 PDF로 만든 스캔본, `benchmarks/eval/real_scan.py`).
     """
-    vals = np.sort(np.array([g for g in gaps if 0.1 <= g <= 1.2]))
+    vals = np.sort(np.array([g for g in gaps if 0.1 <= g <= 0.8]))
     if len(vals) < 30:
         return SPACE_GAP
     best, best_t = -1.0, SPACE_GAP
-    for t in np.arange(0.25, 0.55, 0.01):
+    for t in np.arange(0.18, 0.55, 0.01):
         lo, hi = vals[vals < t], vals[vals >= t]
         if len(lo) == 0 or len(hi) == 0:
             continue
@@ -125,7 +168,7 @@ def space_threshold(gaps: list[float]) -> float:
         between = w0 * w1 * (lo.mean() - hi.mean()) ** 2
         if between > best:
             best, best_t = between, float(t)
-    return min(max(best_t, 0.3), 0.45)
+    return min(max(best_t, 0.2), 0.45)
 
 
 def _segments(mask: np.ndarray, em: float, space_gap: float = SPACE_GAP) -> list[tuple[int, int, float]]:
@@ -186,6 +229,17 @@ def respace_line(mask: np.ndarray, text: str, box_h_px: float, space_gap: float 
     if not chars or mask.size == 0:
         return None
     em = _em(mask, box_h_px)
+    # 목차 점선: 그림에는 점이 수십 개 있는데 OCR은 빠뜨리거나 '…' 몇 개로 읽는다. 양쪽에서 떼어 놓고 맞춘 뒤
+    # OCR이 읽은 점은 제자리에 앞뒤를 띄워 되돌린다 (점선 때문에 줄 전체를 형태소 분석에 넘기면 '사망 재해 분석 결과'처럼 쪼갰다)
+    mask, has_leader = _drop_leader(mask, em)
+    leader_at, leader = -1, ""
+    if has_leader:
+        m = _LEADER_TEXT.search("".join(chars))
+        if m:
+            leader_at, leader = m.start(), m.group()
+            chars = chars[:m.start()] + chars[m.end():]
+            if not chars:
+                return None
     segs = _segments(mask, em, space_gap)
     if not segs:
         return None
@@ -197,57 +251,62 @@ def respace_line(mask: np.ndarray, text: str, box_h_px: float, space_gap: float 
         if shape is not None and chars[0] not in _MARKER_CHARS - _BULLET_LOOKALIKE:
             if chars[0] in _BULLET_LOOKALIKE:
                 chars = chars[1:]
+                leader_at -= 1
             prefix = shape + " "
             segs = segs[1:]
             if not chars:
                 return None
 
     widths = [(b - a + 1) / em for a, b, _ in segs]
+    # 점·티끌만 한 조각 (줄 끝에 남은 점선 한 점, 거친 스캔의 얼룩): OCR 글에 해당 글자가 없으면 비워 둘 수 있다
+    tiny = [_is_dot(mask[:, a:b + 1], em) for a, b, _ in segs]
+    # 줄 맨 앞의 1.5em 이하 조각은 OCR이 읽지 않은 그림 기호(체크 표시, 기차 그림)일 수 있다: 벌점을 주고 비울 수 있다.
+    # 예전에는 첫 글자를 그 기호에 짝지어 '오 시는 길', '지 하철이용'처럼 띄웠다. 첫 글자가 기호를 닮은 글자('O' '0' 'ㅇ')이면
+    # OCR이 그 기호를 읽은 것이므로 비우지 않는다
+    lead = len(segs) >= 2 and widths[0] <= 1.5 and chars[0] not in _BULLET_LOOKALIKE
     expected = [char_width(c) for c in chars]
-    total_w, total_e = sum(widths), sum(expected)
+    spread = [width_spread(c) for c in chars]
+    if chars[0] in _BULLET_LOOKALIKE and len(chars) > 1:
+        # 줄 맨 앞의 '0'·'O'·'ㅇ'은 기호(ㅇ ○, 1em 안팎)를 잘못 읽은 것일 수 있다. 숫자 폭으로 보면 기호 조각을 비우고
+        # '0'을 다음 낱말에 붙였다 ('0액화석유가스의')
+        if chars[0] in "Oo0ㅇㅁ口ロ":
+            expected[0] = 0.9
+        spread[0] = 0.45
+    total_w = sum(w for w, t in zip(widths, tiny) if not t)
+    total_e = sum(expected)
     ratio = total_w / total_e if total_e else 0
     # 글자 수가 그림과 맞지 않으면 (OCR이 글자를 빠뜨리거나 덧붙임) 위치를 믿을 수 없다
-    if not 0.75 <= ratio <= 1.3 or len(segs) > len(chars):
+    if not 0.75 <= ratio <= 1.3 or len(segs) - sum(tiny) - lead > len(chars):
         return None
-    # 동적 계획법: 글자 0..i를 조각 0..j에 나눠 담을 때 폭 차이의 제곱합이 가장 작은 경계
+    # 비율을 조금씩 바꿔 가며 가장 잘 맞는 나눔을 고른다. 전체 폭으로 잰 비율은 폭이 틀리기 쉬운 글자('【'을 '['로
+    # 읽음)에 끌려가서, 장평을 줄인 글꼴에서는 한글 폭을 크게 잡아 글자를 앞 조각으로 밀었다 ('[별첨1]해 외범…')
+    # 그림에서 쉼표·마침표·닫는 괄호는 거의 늘 앞 낱말에 붙고, 여는 괄호는 뒤 낱말에 붙는다: 이런 자리에서 조각이
+    # 시작하면 벌점을 준다 (OCR이 앞의 쉼표를 빠뜨리면 '…(0.32%) ,위치추적기'처럼 쉼표가 다음 조각으로 넘어갔다)
+    starts = [True] + [chars[i] not in ".,:;)]}" and chars[i - 1] not in "([{" for i in range(1, len(chars))]
+    best = None
+    for f in (0.9, 0.95, 1.0, 1.05, 1.1):
+        r = ratio * f
+        got = _assign(widths, tiny, [e * r for e in expected], [v * r for v in spread], starts, lead)
+        if got is not None and (best is None or got[0] < best[0]):
+            best = (got[0], got[1], r)
+    if best is None:
+        return None
+    _, ranges, ratio = best
     expected = [e * ratio for e in expected]
-    prefix_sum = [0.0]
-    for e in expected:
-        prefix_sum.append(prefix_sum[-1] + e)
-    n, k = len(chars), len(segs)
-    inf = float("inf")
-    cost = [[inf] * (n + 1) for _ in range(k + 1)]
-    back = [[0] * (n + 1) for _ in range(k + 1)]
-    cost[0][0] = 0.0
-    for j in range(1, k + 1):
-        for i in range(j, n - (k - j) + 1):
-            best, arg = inf, 0
-            for p in range(j - 1, i):
-                if cost[j - 1][p] == inf:
-                    continue
-                d = (prefix_sum[i] - prefix_sum[p]) - widths[j - 1]
-                c = cost[j - 1][p] + d * d
-                if c < best:
-                    best, arg = c, p
-            cost[j][i], back[j][i] = best, arg
-    cuts, i = [], n
-    for j in range(k, 0, -1):
-        p = back[j][i]
-        cuts.append(p)
-        i = p
-    cuts = sorted(set(cuts) - {0})
-    spaces = set(cuts)
-    # 낱말 안의 '섞인 자리'(한글-숫자·영문, 문장부호 뒤): 영문 글꼴의 공백은 한글 글꼴보다 좁아 더 낮은 기준으로 본다
-    bounds = [0] + cuts + [n]
-    for (a, b), (x0, x1, _) in zip(zip(bounds, bounds[1:]), segs):
-        if not any(_mixed(chars[i - 1], chars[i]) for i in range(a + 1, b)):
+    # 숫자 옆의 공백은 더 넓어야 한다 (`_need_gap`)
+    spaces = {a for (a, b), seg in zip(ranges, segs)
+              if 0 < a < b and seg[2] >= _need_gap(chars[a - 1], chars[a], space_gap, space_gap)}
+    # 낱말 안의 '섞인 자리'(한글-숫자·영문, 문장부호 뒤): 영문 글꼴의 공백은 한글 글꼴보다 좁아 더 낮은 기준으로 본다.
+    for (a, b), (x0, x1, _) in zip(ranges, segs):
+        if b - a < 2 or not any(_mixed(chars[i - 1], chars[i]) for i in range(a + 1, b)):
             continue
         spans = _char_spans(mask[:, x0:x1 + 1], expected[a:b], em)
         if spans is None:
             continue
         for i in range(a + 1, b):
             gap = (spans[i - a][0] - spans[i - a - 1][1] - 1) / em
-            if _mixed(chars[i - 1], chars[i]) and gap >= space_gap * MIXED_RATIO:
+            if _mixed(chars[i - 1], chars[i]) and gap >= _need_gap(chars[i - 1], chars[i], space_gap,
+                                                                    space_gap * MIXED_RATIO):
                 spaces.add(i)
     spaces = {i for i in spaces if _space_allowed(chars, i)}
     out = []
@@ -255,7 +314,131 @@ def respace_line(mask: np.ndarray, text: str, box_h_px: float, space_gap: float 
         if i in spaces:
             out.append(" ")
         out.append(ch)
-    return prefix + "".join(out)
+    body = "".join(out)
+    if leader:
+        k = _pos_with_spaces(chars, spaces, leader_at)
+        body = (body[:k].rstrip() + " " + leader + " " + body[k:].lstrip()).strip()
+    return prefix + body
+
+
+DIGIT_GAP = 0.5  # 숫자 옆(숫자·하이픈 사이)을 띄우는 최소 빈칸 (em)
+_NARROW = set("-–~/")
+
+
+def _need_gap(a: str, b: str, space_gap: float, base: float) -> float:
+    """a와 b 사이를 띄우려면 필요한 빈칸 폭 (em). base는 보통 기준(조각 사이는 space_gap, 섞인 자리는 그 0.6배).
+
+    - 여는 괄호 앞: 괄호 글자의 왼쪽 여백이 넓어 낮은 기준으로 보면 '방문취업 (H-2)'처럼 띄운다 → space_gap
+    - 숫자-숫자, 숫자-하이픈·물결표: 숫자 글꼴은 폭이 같아서 '1'처럼 좁은 숫자 옆이 0.38em까지 빈다. 실제 PDF로 만든
+      스캔본에서 이런 자리의 정답 공백은 0.57em 이상이었다. 고딕 문서는 공백 기준이 0.25em 안팎이라 '1 2', '전-예- 10'처럼
+      띄웠다 → DIGIT_GAP
+    """
+    if (a.isdigit() and (b.isdigit() or b in _NARROW)) or (b.isdigit() and a in _NARROW):
+        return max(base, DIGIT_GAP)
+    if b in _OPEN:
+        return max(base, space_gap)
+    return base
+
+
+_LEADER_TEXT = re.compile(r"[.·ㆍ∙•…‥]*[…‥][.·ㆍ∙•…‥*]*|[.·ㆍ∙•]{2,}\*?")
+
+
+def _pos_with_spaces(chars: list[str], spaces: set[int], i: int) -> int:
+    """공백을 넣은 글에서 i번째 글자(공백 빼고 센 위치)가 놓이는 자리."""
+    return max(i, 0) + sum(1 for s in spaces if s < i)
+
+
+def _is_dot(blob: np.ndarray, em: float) -> bool:
+    """잉크가 점 하나만 한가 (가로·세로 모두 0.35em 이하)."""
+    ys = np.nonzero(blob.any(axis=1))[0]
+    xs = np.nonzero(blob.any(axis=0))[0]
+    if len(xs) == 0:
+        return True
+    return xs[-1] - xs[0] + 1 <= 0.35 * em and ys[-1] - ys[0] + 1 <= 0.35 * em
+
+
+def _drop_leader(mask: np.ndarray, em: float) -> tuple[np.ndarray, bool]:
+    """목차 점선(점 3개 이상이 0.8em 이하 간격으로 1em 넘게 이어진 것)을 줄 그림에서 지운다. (그림, 지웠는가)."""
+    xs = np.nonzero(mask.any(axis=0))[0]
+    if len(xs) == 0:
+        return mask, False
+    blobs: list[list[int]] = [[int(xs[0]), int(xs[0])]]
+    for a, b in zip(xs, xs[1:]):
+        if b - a > 1:
+            blobs.append([int(b), int(b)])
+        else:
+            blobs[-1][1] = int(b)
+    dots = [_is_dot(mask[:, a:b + 1], em) for a, b in blobs]
+    runs, cur = [], []
+    for (a, b), d in zip(blobs, dots):
+        if d and cur and a - cur[-1][1] - 1 <= 0.8 * em:
+            cur.append((a, b))
+            continue
+        if len(cur) >= 3 and cur[-1][1] - cur[0][0] + 1 >= em:
+            runs.append((cur[0][0], cur[-1][1]))
+        cur = [(a, b)] if d else []
+    if len(cur) >= 3 and cur[-1][1] - cur[0][0] + 1 >= em:
+        runs.append((cur[0][0], cur[-1][1]))
+    if not runs:
+        return mask, False
+    mask = mask.copy()
+    for a, b in runs:
+        mask[:, a:b + 1] = False
+    return mask, True
+
+
+LEAD_PENALTY = 3.0  # 줄 맨 앞 조각을 OCR이 읽지 않은 그림 기호로 볼 때의 벌점
+START_PENALTY = 2.0  # 조각이 쉼표·닫는 괄호 같은 글자로 시작할 때의 벌점 (폭 어긋남 약 1.4배 불확실성만큼)
+
+
+def _assign(widths: list[float], tiny: list[bool], expected: list[float], spread: list[float],
+            starts: list[bool], lead: bool = False) -> tuple[float, list[tuple[int, int]]] | None:
+    """글자들을 조각에 차례로 나눠 담는다 (동적 계획법). (비용, 조각마다 담은 글자 범위 (시작, 끝)) — 빈 조각은 시작 = 끝.
+
+    조각 폭과 담은 글자 예상 폭의 차이를, 그 글자들의 폭 불확실성(`width_spread`)으로 나눈 제곱의 합이 가장 작은
+    나눔을 고른다. 폭이 불확실한 괄호·따옴표가 든 조각 쪽에 어긋남을 둔다. 점만 한 조각(tiny)은 비울 수 있다.
+    조각 폭의 절반~두 배(±1.5em)를 넘는 글자 묶음은 보지 않는다 (긴 줄에서도 빠르게). starts[i]가 거짓인 글자에서
+    조각이 시작하면 벌점(START_PENALTY)을 더한다. lead이면 첫 조각을 벌점(LEAD_PENALTY)을 내고 비울 수 있다.
+    """
+    import bisect
+
+    n, k = len(expected), len(widths)
+    ps, pv = [0.0], [0.0]
+    for e, s in zip(expected, spread):
+        ps.append(ps[-1] + e)
+        pv.append(pv[-1] + s * s)
+    inf = float("inf")
+    cost = [[inf] * (n + 1) for _ in range(k + 1)]
+    back = [[0] * (n + 1) for _ in range(k + 1)]
+    cost[0][0] = 0.0
+    for j in range(1, k + 1):
+        w = widths[j - 1]
+        for i in range(n + 1):
+            best, arg = inf, 0
+            if tiny[j - 1] and cost[j - 1][i] < inf:
+                best, arg = cost[j - 1][i] + (w / 0.1) ** 2, i
+            elif j == 1 and lead and i == 0:
+                best, arg = LEAD_PENALTY, 0
+            # 담을 글자 폭 (ps[i] - ps[p])이 [w/2 - 1.5, 2w + 1.5] 안에 드는 p만 본다
+            lo = bisect.bisect_left(ps, ps[i] - 2 * w - 1.5, 0, i)
+            hi = bisect.bisect_right(ps, ps[i] - w / 2 + 1.5, 0, i)
+            for p in range(lo, min(hi, i)):
+                if cost[j - 1][p] == inf:
+                    continue
+                d = (ps[i] - ps[p]) - w
+                c = cost[j - 1][p] + d * d / (pv[i] - pv[p] + 0.0025) + (0.0 if starts[p] else START_PENALTY)
+                if c < best:
+                    best, arg = c, p
+            cost[j][i], back[j][i] = best, arg
+    if cost[k][n] == inf:
+        return None
+    ranges: list[tuple[int, int]] = [(0, 0)] * k
+    i = n
+    for j in range(k, 0, -1):
+        p = back[j][i]
+        ranges[j - 1] = (p, i)
+        i = p
+    return cost[k][n], ranges
 
 
 def _char_spans(mask: np.ndarray, widths: list[float], em: float) -> list[tuple[int, int]] | None:
@@ -348,6 +531,10 @@ def _space_allowed(chars: list[str], i: int) -> bool:
     a, b = chars[i - 1], chars[i]
     if b in ".,:;)]}%" or a in "([{":
         return False
+    # 가운뎃점은 앞뒤 낱말에 붙여 쓴다 ('대내·외', '사업·시설'). 점 둘레의 여백이 넓어 빈칸으로는 가를 수 없다.
+    # 줄 맨 앞의 점은 개조식 기호라 뒤를 띄운다
+    if b in _DOTS or (a in _DOTS and i > 1):
+        return False
     if a.isdigit() and "가" <= b <= "힣":
         rest = "".join(chars[i:i + 4])
         return not any(rest.startswith(u) for u in _UNITS)
@@ -379,12 +566,31 @@ def _line_box(line: list[OcrCell]):
 
 
 def cells_gaps(page: PageImage, cells: list[OcrCell]) -> list[float]:
-    """OCR 상자들(줄로 묶음)의 빈칸 폭들. 문서 전체의 공백 기준(`space_threshold`)을 정할 때 모은다."""
+    """OCR 상자마다 그 안의 빈칸 폭들. 문서 전체의 공백 기준(`space_threshold`)을 정할 때 모은다.
+
+    상자 사이의 빈칸은 넣지 않는다. 표 영역은 여러 칸의 상자가 한 줄로 묶여 칸 사이 빈칸(0.4~1em)이 섞이고,
+    그러면 기준이 올라가 공백을 놓쳤다 (교육 과정 표: 0.42em, 맞는 값 0.27em 안팎).
+    """
     out: list[float] = []
-    for line in group_lines(cells):
-        box = _line_box(line)
-        out += line_gaps(page.crop(box), (box[3] - box[1]) * SCALE)
+    for c in cells:
+        out += line_gaps(page.crop(c.box), (c.box[3] - c.box[1]) * SCALE)
     return out
+
+
+def _between_boxes_cleared(mask: np.ndarray, line: list[OcrCell], box) -> np.ndarray:
+    """한 줄의 OCR 상자와 상자 사이(어느 상자에도 들지 않는 곳)의 잉크를 지운다.
+
+    줄이 표의 두 칸에 걸치면 그 사이의 세로 괘선 조각(위아래가 끊겨 괘선으로 지워지지 않은 것)이 글자 조각으로 잡혀
+    글자와 조각의 짝이 밀렸다 ('구분 제 품(인체보호기 준대 비%)'). 상자 사이에는 OCR이 읽은 글자가 없으므로 지워도 된다.
+    """
+    if len(line) < 2:
+        return mask
+    mask = mask.copy()
+    for a, b in zip(line, line[1:]):
+        x0, x1 = int(round((a.box[2] - box[0]) * SCALE)), int(round((b.box[0] - box[0]) * SCALE))
+        if x1 > x0:
+            mask[:, max(x0, 0):max(x1, 0)] = False
+    return mask
 
 
 def respace_cells(page: PageImage, cells: list[OcrCell],
@@ -394,7 +600,7 @@ def respace_cells(page: PageImage, cells: list[OcrCell],
     for line in group_lines(cells):
         box = _line_box(line)
         text = "".join(c.text for c in line)
-        mask = page.crop(box)
+        mask = _between_boxes_cleared(page.crop(box), line, box)
         h_px = (box[3] - box[1]) * SCALE
         out.append((respace_line(mask, text, h_px, space_gap), " ".join(c.text for c in line)))
     return out
