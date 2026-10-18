@@ -173,3 +173,14 @@ def test_table_split_over_many_pages_is_joined_to_the_end():
     tables = [b for b in parser.doc.blocks if isinstance(b, Table)]
     assert len(tables) == 1
     assert [r.cells[0].blocks[0].text for r in tables[0].rows] == ["구분", "기관", "가", "나", "다"]
+
+
+def test_dates_dividers_and_sentences_are_not_titles():
+    # 큰 글씨라서 Docling이 절 제목으로 분류하는 줄 (실제 공고서: 제목 정밀도 0.625)
+    from korean_parser.parsers.pdf import _not_a_title
+
+    for text in ["2026년 9월 14일", "2026. 9. 14.(월)", "- 다 음 -", "< 본 계약은 청렴계약(서약)제가 적용됩니다 >",
+                 "□ 방문취업 동포는 취업개시 신고를 하여야 합니다."]:
+        assert _not_a_title(text), text
+    for text in ["1 입찰개요", "용 역 계 약 입 찰 공 고", "2026년 사업계획", "<자료 검색>", "Ⅱ. 추진 방향"]:
+        assert not _not_a_title(text), text

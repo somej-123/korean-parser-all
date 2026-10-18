@@ -127,6 +127,16 @@ def _row_texts(row) -> list[str]:
     return [" ".join(getattr(x, "text", "") for x in c.blocks).strip() for c in row.cells]
 
 
+_DATE_ONLY = re.compile(r"^\s*\d{4}\s*[.년]\s*\d{1,2}\s*[.월]\s*\d{1,2}\s*[.일]?\s*(\([^)]{1,3}\))?\s*$")
+_SENTENCE = re.compile(r"(니다|습니다|한다|된다|이다|있다|없다|하라|하시오|바랍니다)\s*[.!]?\s*[>〉》\])）」』】]*\s*$")
+
+
+def _not_a_title(text: str) -> bool:
+    """제목으로 분류되었어도 제목이 아닌 줄: 날짜뿐인 줄, '- 다 음 -', 문장."""
+    t = text.strip()
+    return bool(_DATE_ONLY.match(t) or re.sub(r"[\s\-–—]", "", t) == "다음" or _SENTENCE.search(t))
+
+
 def _same_table(a, b, last_page: int | None = None) -> bool:
     """쪽을 넘어 이어지는 같은 표인가: 다음 쪽 표이고 열 수와 열 너비가 같다.
 
@@ -290,6 +300,7 @@ class PdfParser:
         self._read_meta()
         self._page_setup(ddoc)
         self._convert(ddoc)
+        self._demote_non_titles()
         self._assign_heading_levels()
         if self.fixed_layout and not self.ocr:
             self._build_fixed_pages()
@@ -1033,6 +1044,21 @@ class PdfParser:
             text = f"{marker} {text}"
         return Paragraph(id=self._new_id(), prov=self._prov(page.number, box), inlines=self._inlines(text, style),
                          style=self._layout(page, box))
+
+    def _demote_non_titles(self) -> None:
+        """Docling이 절 제목으로 분류했지만 제목이 아닌 줄을 문단으로 되돌린다.
+
+        날짜뿐인 줄('2026년 9월 14일'), 공문의 '- 다 음 -' 구분 줄, 문장으로 끝나는 줄('< 본 계약은 청렴계약(서약)제가
+        적용됩니다 >', '□ … 다음과 같습니다.'). 큰 글씨라서 제목으로 분류되지만 제목은 문장이 아니다 (실제 문서 구조 정답:
+        한남대 공고서 제목 정밀도 0.625).
+        """
+        demoted = set()
+        for k, b in enumerate(self.doc.blocks):
+            if isinstance(b, Heading) and _not_a_title(b.text):
+                self.doc.blocks[k] = Paragraph(id=b.id, prov=b.prov, inlines=b.inlines, style=b.style)
+                demoted.add(id(b))
+        if demoted:
+            self._heading_sizes = [(h, sz) for h, sz in getattr(self, "_heading_sizes", []) if id(h) not in demoted]
 
     def _assign_heading_levels(self) -> None:
         """Docling은 제목 단계를 거의 1로 준다. 글자 크기 순서로 단계를 다시 매긴다.

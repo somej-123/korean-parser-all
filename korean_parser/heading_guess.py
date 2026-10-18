@@ -101,7 +101,13 @@ class TitleFinder:
             level, marker, kind = p.outline.level, p.outline.marker, p.outline.kind
         elif p.list_info is not None:
             level, marker = p.list_info.level, p.list_info.marker
-            kind = f"list:{p.list_info.list_id}:{p.list_info.level}" if p.list_info.ordered else "dot"
+            # 자동 번호도 보이는 번호 모양으로 종류를 정한다: 자동 번호 '1.'과 직접 친 '2.'가 같은 단계여야 한다
+            # (동래구 현황: 첫 제목만 자동 번호라 다른 단계가 되었다)
+            shown = match_marker(f"{marker} 가") if p.list_info.ordered else None
+            if shown is not None:
+                kind = shown[0]
+            else:
+                kind = f"list:{p.list_info.list_id}:{p.list_info.level}" if p.list_info.ordered else "dot"
         elif m and m[0] in self.kind_level:  # 제목 상자(한 칸 표) 안의 "Ⅱ. 시스템 현황" 등
             level, marker, kind = self.kind_level[m[0]], m[1], m[0]
         elif d := _DECIMAL.match(body):  # 2.2 가스기술기준
@@ -120,7 +126,9 @@ class TitleFinder:
         if _TOC_LINE.search(p.text):
             return None
         rest = m[2] if m else body
-        if not (2 <= len(rest) <= 40) or _TITLE_TAIL.search(rest) or ":" in rest:
+        # 절 번호 줄은 영문 제목('2.4 ISO (International Organization for Standardization)')이 길어 60자까지 본다
+        limit = 60 if kind.startswith("decimal") else 40
+        if not (2 <= len(rest) <= limit) or _TITLE_TAIL.search(rest) or ":" in rest:
             return None  # 문장, 긴 글, '사업기간 : 7개월' 같은 항목: 값 줄은 제목이 아니다
         styles = [i.style for i in p.inlines if isinstance(i, Text) and i.text.strip()]
         bold = any(s is not None and s.bold for s in styles)
@@ -160,6 +168,22 @@ def stream(blocks, llm):
             yield b
 
 
+def _guess_level(kind: str, heading_level: int, ranks: dict[str, int]) -> int:
+    """추정 제목의 단계. 표지 종류가 처음 나온 순서를 바로 앞 Heading 단계에 더한다.
+
+    절 번호(2.2, 6.6.1)는 처음 나온 순서가 아니라 점 개수로 정한다. '6.6'이 문장이라 제목이 아니면 6장 아래 첫 소제목이
+    '6.6.1'인데, 순서로 매기면 6.6.1이 2단계, 뒤의 6.7이 3단계로 뒤집혔다 (가스공사 규격표준). '1.'(num_dot)이 같은 흐름에
+    추정 제목으로 나왔으면 그 단계가 점 0개다.
+    """
+    if kind.startswith("decimal"):
+        dots = int(kind[len("decimal"):]) - 1
+        family = ranks.setdefault("decimal", len(ranks))
+        if "num_dot" in ranks:
+            return heading_level + ranks["num_dot"] + 1 + dots
+        return heading_level + family + dots
+    return heading_level + ranks.setdefault(kind, len(ranks)) + 1
+
+
 def annotate_heading_guesses(doc: Document) -> None:
     """제목처럼 쓰인 번호 문단에 heading_guess를 붙인다 (문단은 그대로)."""
     from .render.llm import LlmRenderer
@@ -175,5 +199,4 @@ def annotate_heading_guesses(doc: Document) -> None:
             found = finder.paragraph(b, before_table=k + 1 < len(flow) and isinstance(flow[k + 1], Table))
             if found is not None and b.heading_guess is None:  # 파서가 먼저 붙인 추정(슬라이드 제목 등)은 그대로
                 _, why, kind = found
-                rank = ranks.setdefault(kind, len(ranks))
-                b.heading_guess = HeadingGuess(level=min(finder.heading_level + rank + 1, 6), reason=why)
+                b.heading_guess = HeadingGuess(level=min(_guess_level(kind, finder.heading_level, ranks), 6), reason=why)
