@@ -193,3 +193,32 @@ def test_table_of_contents_lines_stay_paragraphs():
     lines = [re.sub("·+", " ", b.text).split() for b in toc.blocks if isinstance(b, Paragraph) and "·" in b.text]
     assert [" ".join(w) for w in lines][:3] == ["I. 사업 개요 1", "1. 사업 개요 1", "2. 사업목표 및 필요성 1"]
     assert len(lines) == 12
+
+
+def test_scanned_table_of_contents_is_kept(tmp_path):
+    # 스캔본 목차: Docling은 목차 글을 '목차 표'(document_index) 칸에만 두고 줄을 따로 내지 않는다. 목차 표를 건너뛰고 안의
+    # 줄을 읽게 되어 있어 목차가 경고 없이 통째로 빠졌다 (실제 공공 PDF로 만든 스캔본 3개, 글자 재현율 0.01)
+    pytest.importorskip("onnxruntime")
+    from PIL import Image, ImageDraw, ImageFont
+
+    fonts = Path("C:/Windows/Fonts")
+    if not (fonts / "malgun.ttf").exists():
+        pytest.skip("맑은 고딕 글꼴이 없다")
+    img = Image.new("RGB", (1240, 1754), "white")
+    draw = ImageDraw.Draw(img)
+    big, font = ImageFont.truetype(str(fonts / "malgunbd.ttf"), 48), ImageFont.truetype(str(fonts / "malgun.ttf"), 30)
+    draw.text((560, 150), "목 차", font=big, fill="black")
+    items = [("Ⅰ. 사업 개요", 3), ("1. 추진 배경", 4), ("2. 추진 목표", 6), ("Ⅱ. 추진 계획", 8), ("1. 세부 과제", 9),
+             ("2. 추진 일정", 12), ("Ⅲ. 예산 계획", 15), ("1. 소요 예산", 16), ("2. 재원 조달", 18), ("Ⅳ. 기대 효과", 20)]
+    for k, (title, page) in enumerate(items):
+        x, y = (150 if title[0] in "ⅠⅡⅢⅣ" else 200), 300 + 70 * k
+        width = draw.textlength(title, font=font)
+        draw.text((x, y), title, font=font, fill="black")
+        draw.text((x + width + 10, y), "·" * int((1000 - x - width) / draw.textlength("·", font=font)), font=font,
+                  fill="black")
+        draw.text((1060, y), str(page), font=font, fill="black")
+    scan = tmp_path / "toc.pdf"
+    img.save(scan, "PDF", resolution=150)
+    text = re.sub(r"\s", "", render_llm(parse(scan), with_ids=False))
+    found = [t for t, _ in items if re.sub(r"\s", "", t.split(". ")[1]) in text]
+    assert len(found) >= 9, found  # OCR 글자 오류로 한두 개는 다를 수 있다 (고치기 전에는 0개)

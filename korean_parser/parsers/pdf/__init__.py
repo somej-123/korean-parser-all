@@ -653,6 +653,10 @@ class PdfParser:
 
         skip: set[str] = set()
         last_page = None
+        # 안의 줄이 따로 글 항목으로 나온 목차 표. 스캔본(OCR)에서는 Docling이 목차 글을 표 칸에만 두고 줄을 따로 내지 않아,
+        # 목차 표를 건너뛰면 목차가 경고 없이 통째로 빠졌다 (실제 공공 PDF로 만든 스캔본 3개. 그중 하나는 목차가 아닌 교육과정
+        # 목록 표를 Docling이 목차로 잘못 분류했다). 줄이 따로 없는 목차 표는 보통 표처럼 읽는다
+        toc_lines = {t.self_ref for it in ddoc.texts if (t := _table_of(it, ddoc)) is not None and _is_toc(t)}
         for item, _level in ddoc.iterate_items(included_content_layers={ContentLayer.BODY}):
             if item.self_ref in skip or not getattr(item, "prov", None):
                 continue
@@ -666,7 +670,7 @@ class PdfParser:
                 self.doc.blocks.append(PageBreak(id=self._new_id(), prov=self._prov(page_no, None)))
             last_page = page_no
 
-            if isinstance(item, TableItem) and _is_toc(item) and item.self_ref not in self._ruled:
+            if isinstance(item, TableItem) and _is_toc(item) and item.self_ref not in self._ruled                     and item.self_ref in toc_lines:
                 continue  # 목차: 표 대신 안의 줄(글 항목)이 차례로 문단이 된다
             if isinstance(item, TableItem):
                 self.doc.blocks.extend(self._table(item, page, box, ddoc))
