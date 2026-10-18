@@ -55,6 +55,14 @@ class Package:
         self._rels[part] = out
         return out
 
+    def external(self, part: str) -> dict[str, str]:
+        """part의 외부 관계: id → 주소 그대로 (하이퍼링크 등. rels()는 꾸러미 안 대상만 돌려준다)."""
+        base = posixpath.dirname(part)
+        root = self.xml(posixpath.join(base, "_rels", posixpath.basename(part) + ".rels"))
+        if root is None:
+            return {}
+        return {r.get("Id", ""): r.get("Target", "") for r in root if r.get("TargetMode") == "External"}
+
     def rel_of_type(self, part: str, kind: str) -> str | None:
         return next((p for p, k in self.rels(part).values() if k == kind), None)
 

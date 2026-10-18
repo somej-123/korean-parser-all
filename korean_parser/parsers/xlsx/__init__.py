@@ -13,6 +13,13 @@
   그 밖의 형식은 일반 숫자(유효 숫자 15자리)로 쓴다
 - 병합 칸(mergeCells) → row_span·col_span. 굵은 글씨, 단색 칸 배경, 열 너비
 - 숨긴 시트도 넣고 경고를 남긴다
+- 칸 메모(xl/commentsN.xml, 새 스레드 메모 xl/threadedComments)는 Note(kind="comment")로, 칸 글 뒤에 NoteRef.
+  스레드 메모가 있으면 그것을 쓴다 (Excel은 옛 메모 자리에 '[스레드 메모]…' 안내 글을 함께 저장한다)
+- 칸 하이퍼링크(hyperlinks: 외부 주소 또는 '시트!칸' 위치)는 Text.link
+- 인쇄용 머리글·바닥글(headerFooter: &L &C &R 구역, &P 쪽 번호 같은 코드는 뺀다)은 doc.header·footer (글이 다른 것만)
+- 칸 수에 상한을 두지 않는다 (82만 칸 시트: 16초, 메모리 2.4GB). 메모리가 모자란 환경은 KP_XLSX_MAX_CELLS로 상한을 두고,
+  그때는 앞부분만 넣고 경고한다
+- 시트의 글상자·도형 글(xdr:sp)은 Drawing(도형 + 글), 그룹 안 도형도. 시트에 넣은 OLE 개체(다른 파일)는 경고만
 - 시트의 차트(xl/drawings → xl/charts)는 표 뒤에 Chart로. 차트 XML에 값 캐시가 없으면(Excel이 아닌 프로그램이 만든 파일)
   계열·범주가 가리키는 칸('일정 관리'!$E$2:$E$12)의 값으로 채운 뒤 DOCX 차트 해석을 그대로 쓴다. 그림은 Figure로
 """
@@ -22,6 +29,7 @@ from __future__ import annotations
 import base64
 import datetime
 import mimetypes
+import os
 import posixpath
 import re
 from fractions import Fraction
@@ -30,7 +38,10 @@ from pathlib import Path
 
 from lxml import etree
 
-from ...ir import Block, Cell, Document, Figure, Heading, Image, Meta, Paragraph, Provenance, Row, Table, Text, TextStyle
+from ...ir import (
+    Block, Cell, Document, Drawing, Figure, Heading, Image, Meta, Note, NoteRef, Paragraph, Provenance, Row, Shape, Table,
+    Text, TextStyle,
+)
 from ..docx.drawing import chart_ref, read_chart
 from ..ooxml import R_EMBED, R_ID, Package, ln
 
@@ -49,7 +60,25 @@ C = "{http://schemas.openxmlformats.org/drawingml/2006/chart}"
 XDR = "{http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing}"
 A = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
 _RANGE = re.compile(r"^(?:'?(.+?)'?!)?\$?([A-Z]+)\$?(\d+)(?::\$?([A-Z]+)\$?(\d+))?$")
-_MAX_CELLS = 200_000  # 시트 하나의 칸 수가 이보다 많으면 앞부분만 넣고 경고 (거대한 데이터 시트)
+TC = "{http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments}"
+_HF_CODE = re.compile(r'&(?:"[^"]*"|K[0-9A-Fa-f]{6}|K\d{2}[+-]\d{3}|\d+|[PNDTZFGHBIUSEXYO])')
+
+
+def _max_cells() -> int | None:
+    """시트 하나에 넣을 칸 수 상한. 기본은 없다. 메모리가 모자란 환경은 KP_XLSX_MAX_CELLS로 정한다."""
+    try:
+        n = int(os.environ.get("KP_XLSX_MAX_CELLS", "0"))
+    except ValueError:
+        return None
+    return n if n > 0 else None
+
+
+def header_footer_text(code: str, sheet: str) -> str:
+    """머리글·바닥글 코드('&L&"맑은 고딕,굵게"&12보고서&R&P쪽')에서 보이는 글만. &A는 시트 이름, &&는 &."""
+    code = code.replace("&&", "\0").replace("&A", sheet)
+    parts = [p for p in re.split(r"&[LCR]", code)]
+    text = "  ".join(" ".join(_HF_CODE.sub(" ", p).split()) for p in parts)
+    return " ".join(text.split()).replace("\0", "&")
 
 
 def parse_xlsx(path: str | Path) -> Document:
@@ -233,6 +262,7 @@ class XlsxParser:
         self.fills: dict[int, str] = {}
         self.date1904 = False
         self.values: dict[str, dict[tuple[int, int], tuple[str, float | None]]] = {}  # 시트 → 칸 → (보이는 글, 숫자)
+        self._hf_seen: set[tuple[str, str]] = set()
 
     def _new_id(self) -> str:
         self._seq += 1
@@ -263,7 +293,12 @@ class XlsxParser:
                 continue
             heading = Heading(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n), level=1,
                               inlines=[Text(text=name)])
-            sheets.append((n, name, part, root, heading, self._sheet(root, n, name)))
+            links = self._hyperlinks(root, part)
+            comments = self._comments(part, n)
+            self._header_footer(root, name, n)
+            if root.find(f"{S}oleObjects") is not None:
+                self._warn(f"시트에 넣은 OLE 개체(다른 파일)는 넣지 않음: {name}")
+            sheets.append((n, name, part, root, heading, self._sheet(root, n, name, links, comments)))
         # 차트는 다른 시트의 칸을 가리킬 수 있으므로 모든 시트를 읽은 뒤에
         for n, name, part, root, heading, table in sheets:
             self.doc.blocks.append(heading)
@@ -339,7 +374,66 @@ class XlsxParser:
         is_date = fmt_id in _BUILTIN_DATE or (fmt_id >= 164 and _is_date_format(code or ""))
         return format_number(value, code, is_date, self.date1904)
 
-    def _sheet(self, root, n: int, name: str) -> Table | None:
+    def _hyperlinks(self, root, part: str) -> dict[tuple[int, int], str]:
+        """칸 → 링크. 외부 주소는 관계(r:id)에서, 문서 안 위치('시트2!A1')는 location으로."""
+        external = self.pkg.external(part)
+        out = {}
+        for h in root.iter(f"{S}hyperlink"):
+            pos = _ref(h.get("ref", "").split(":")[0])
+            url = external.get(h.get(R_ID) or "") or (f"#{h.get('location')}" if h.get("location") else None)
+            if pos is not None and url:
+                out[pos] = url
+        return out
+
+    def _comments(self, part: str, n: int) -> dict[tuple[int, int], list[tuple[str, str]]]:
+        """칸 → [(메모 id, 표시)]. 메모 글은 doc.notes에 Note(kind="comment")로 넣는다."""
+        found: dict[tuple[int, int], list[str]] = {}
+        threaded = self.pkg.rel_of_type(part, "threadedComment")
+        root = self.pkg.xml(threaded) if threaded else None
+        if root is not None:
+            # 답글은 첫 메모와 같은 칸에 차례로 붙인다
+            for tc in root.iter(f"{TC}threadedComment"):
+                pos = _ref(tc.get("ref", ""))
+                text = "".join(t.text or "" for t in tc.iter(f"{TC}text")).strip()
+                if pos is not None and text:
+                    found.setdefault(pos, []).append(text)
+        else:
+            legacy = self.pkg.rel_of_type(part, "comments")
+            root = self.pkg.xml(legacy) if legacy else None
+            for cm in root.iter(f"{S}comment") if root is not None else []:
+                pos = _ref(cm.get("ref", ""))
+                text = "".join(t.text or "" for t in cm.iter(f"{S}t") if ln(t.getparent()) != "rPh").strip()
+                if pos is not None and text:
+                    found.setdefault(pos, []).append(text)
+        out: dict[tuple[int, int], list[tuple[str, str]]] = {}
+        for pos in sorted(found):
+            k = sum(1 for nt in self.doc.notes.values() if nt.kind == "comment") + 1
+            key = f"cm{k}"
+            paras = [Paragraph(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n), inlines=[Text(text=t)])
+                     for t in found[pos]]
+            self.doc.notes[key] = Note(kind="comment", label=f"메모{k}", blocks=paras)
+            out[pos] = [(key, f"메모{k}")]
+        return out
+
+    def _header_footer(self, root, name: str, n: int) -> None:
+        """인쇄용 머리글·바닥글. 글이 같은 것은 한 번만 (시트마다 같은 머리글이 흔하다)."""
+        hf = root.find(f"{S}headerFooter")
+        if hf is None:
+            return
+        for tag, target in (("oddHeader", self.doc.header), ("evenHeader", self.doc.header),
+                            ("firstHeader", self.doc.header), ("oddFooter", self.doc.footer),
+                            ("evenFooter", self.doc.footer), ("firstFooter", self.doc.footer)):
+            el = hf.find(f"{S}{tag}")
+            text = header_footer_text(el.text or "", name) if el is not None else ""
+            key = ("header" if "Header" in tag else "footer", text)
+            if text and key not in self._hf_seen:
+                self._hf_seen.add(key)
+                target.append(Paragraph(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n),
+                                        inlines=[Text(text=text)]))
+
+    def _sheet(self, root, n: int, name: str, links=None, comments=None) -> Table | None:
+        links, comments = links or {}, comments or {}
+        limit = _max_cells()
         cells: dict[tuple[int, int], tuple[str, int]] = {}
         for c in root.iter(f"{S}c"):
             pos = _ref(c.get("r", ""))
@@ -355,9 +449,11 @@ class XlsxParser:
             self.values.setdefault(name, {})[pos] = (text, number)
             if text or (style < len(self.xf) and self.xf[style][2] in self.fills):
                 cells[pos] = (text, style)
-            if len(cells) >= _MAX_CELLS:
-                self._warn(f"칸이 너무 많아 앞부분 {_MAX_CELLS:,}칸만 넣음: {name}")
+            if limit and len(cells) >= limit:
+                self._warn(f"칸이 너무 많아 앞부분 {limit:,}칸만 넣음: {name} (KP_XLSX_MAX_CELLS)")
                 break
+        for pos in comments:  # 메모만 있고 글이 없는 칸도 표에 남긴다
+            cells.setdefault(pos, ("", 0))
         merges: dict[tuple[int, int], tuple[int, int]] = {}
         covered: set[tuple[int, int]] = set()
         for mc in root.iter(f"{S}mergeCell"):
@@ -370,7 +466,7 @@ class XlsxParser:
                 for cc in range(p[1], q2[1] + 1):
                     if (r, cc) != p:
                         covered.add((r, cc))
-        filled = [pos for pos, (text, _) in cells.items() if text]
+        filled = [pos for pos, (text, _) in cells.items() if text or pos in comments]
         if not filled:
             return None
         r0, r1 = min(p[0] for p in filled), max(p[0] for p in filled)
@@ -390,10 +486,12 @@ class XlsxParser:
                 rs, cs = merges.get((r, c), (1, 1))
                 cell = Cell(row_span=min(rs, r1 - r + 1), col_span=min(cs, c1 - c + 1))
                 fmt, font, fill = self.xf[style] if style < len(self.xf) else (0, 0, 0)
-                if text:
+                if text or (r, c) in comments:
                     tstyle = TextStyle(bold=True) if font in self.bold_fonts else None
+                    inlines = [Text(text=text, style=tstyle, link=links.get((r, c)))] if text else []
+                    inlines += [NoteRef(note_id=key, label=label) for key, label in comments.get((r, c), [])]
                     cell.blocks = [Paragraph(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n),
-                                             inlines=[Text(text=text, style=tstyle)])]
+                                             inlines=inlines)]
                 cell.background = self.fills.get(fill)
                 row.cells.append(cell)
             table.rows.append(row)
@@ -430,6 +528,9 @@ class XlsxParser:
                     continue
                 chart.id, chart.prov = self._new_id(), Provenance(parser=PARSER_NAME, page=n)
                 out.append(chart)
+            drawing = self._shapes(anchor, n)
+            if drawing is not None:
+                out.append(drawing)
             for pic in anchor.iter(f"{XDR}pic"):
                 blip = pic.find(f".//{A}blip")
                 target = rels.get(blip.get(R_EMBED) if blip is not None else "", (None,))[0]
@@ -445,6 +546,44 @@ class XlsxParser:
                                   width_pt=w or None, height_pt=h or None,
                                   alt=(nv.get("descr") or "").strip() or None if nv is not None else None))
         return out
+
+    def _shapes(self, anchor, n: int) -> Drawing | None:
+        """앵커 안의 글상자·도형(그룹 안 포함)을 하나의 Drawing으로. 글이 있는 도형만 (장식 도형은 뺀다).
+
+        위치·크기는 도형의 a:xfrm(EMU). 그룹 안 도형은 그룹 좌표라 앵커 안 상대 위치로만 맞춘다.
+        """
+        shapes = []
+        for sp in anchor.iter(f"{XDR}sp"):
+            body = sp.find(f"{XDR}txBody")
+            paras = []
+            for p in body.iter(f"{A}p") if body is not None else []:
+                text = "".join(t.text or "" for t in p.iter(f"{A}t"))
+                if text.strip():
+                    paras.append(Paragraph(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n),
+                                           inlines=[Text(text=text)]))
+            if not paras:
+                continue
+            off, ext = sp.find(f".//{A}xfrm/{A}off"), sp.find(f".//{A}xfrm/{A}ext")
+            x = int(off.get("x", "0")) / 12700 if off is not None else 0.0
+            y = int(off.get("y", "0")) / 12700 if off is not None else 0.0
+            w = int(ext.get("cx", "0")) / 12700 if ext is not None else 200.0
+            h = int(ext.get("cy", "0")) / 12700 if ext is not None else 60.0
+            geom = sp.find(f".//{A}prstGeom")
+            fill = sp.find(f"{XDR}spPr/{A}solidFill/{A}srgbClr")
+            line = sp.find(f"{XDR}spPr/{A}ln")
+            stroke = None if line is not None and line.find(f"{A}noFill") is not None else "#000000"
+            shapes.append(Shape(x=x, y=y, width=w or 200.0, height=h or 60.0,
+                                geometry=geom.get("prst", "rect") if geom is not None else "rect",
+                                fill=f"#{fill.get('val').upper()}" if fill is not None and fill.get("val") else None,
+                                stroke=stroke, text_blocks=paras, text_v_align="top"))
+        if not shapes:
+            return None
+        x0, y0 = min(s.x for s in shapes), min(s.y for s in shapes)
+        for s in shapes:
+            s.x, s.y = s.x - x0, s.y - y0
+        return Drawing(id=self._new_id(), prov=Provenance(parser=PARSER_NAME, page=n),
+                       width_pt=max(s.x + s.width for s in shapes), height_pt=max(s.y + s.height for s in shapes),
+                       shapes=shapes)
 
     def _fill_caches(self, chart_root, default_sheet: str) -> None:
         """값 캐시가 없는 계열 이름·범주·값(strRef·numRef)을 가리키는 칸의 값으로 채운다."""

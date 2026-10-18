@@ -157,6 +157,28 @@ def source_pages(path: Path) -> list[list[str]] | None:
                     elif t == "str" and v is not None and v.text:
                         lines.append(v.text)
                 out.append(lines)
+            # 칸 밖의 글: 칸 메모(스레드 메모가 있으면 그것만: Excel이 옛 메모 자리에 안내 글을 함께 저장한다),
+            # 글상자·도형 글, 인쇄 머리글·바닥글(&코드 빼고, 같은 글은 한 번)
+            names = z.namelist()
+            threaded = [n for n in names if n.startswith("xl/threadedComments/")]
+            extra = []
+            for n in threaded or [n for n in names if re.match(r"xl/comments\d*\.xml$", n)]:
+                root = etree.fromstring(z.read(n))
+                extra += ["".join(t.text or "" for t in el.iter() if isinstance(t.tag, str)
+                                  and etree.QName(t).localname in ("t", "text") and etree.QName(t.getparent()).localname != "rPh")
+                          for el in root.iter() if isinstance(el.tag, str)
+                          and etree.QName(el).localname in ("comment", "threadedComment")]
+            for n in names:
+                if re.match(r"xl/drawings/drawing\d+\.xml$", n):
+                    root = etree.fromstring(z.read(n))
+                    extra += ["".join(t.text or "" for t in p.iter(A + "t")) for p in root.iter(A + "p")]
+            hf = set()
+            for n in sorted(n for n in names if re.match(r"xl/worksheets/sheet\d+\.xml$", n)):
+                for el in etree.fromstring(z.read(n)).iter():
+                    if isinstance(el.tag, str) and etree.QName(el).localname.endswith(("Header", "Footer")) and el.text:
+                        hf.add(re.sub(r'&(?:"[^"]*"|K\w{6}|\d+|[A-Za-z&])', "", el.text))
+            if extra or hf:
+                out.append(extra + sorted(hf))
             return out
     if ext == ".hwp":
         return [_hwp_texts(path)]

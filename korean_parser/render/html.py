@@ -549,7 +549,8 @@ class HtmlRenderer:
                 f'<div class="kp-note" id="kp-note-{k}"><a href="#kp-noteref-{k}">{escape(note.label)}</a>'
                 f"<div>{self.blocks(note.blocks)}</div></div>"
             )
-        return f'<section class="kp-notes" aria-label="각주">{"".join(items)}</section>'
+        label = "각주·메모" if any(n.kind == "comment" for n in self.doc.notes.values()) else "각주"
+        return f'<section class="kp-notes" aria-label="{label}">{"".join(items)}</section>'
 
 
 def render_html(doc: Document, standalone: bool = True, layout: str = "auto") -> str:

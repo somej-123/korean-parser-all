@@ -276,3 +276,90 @@ def test_fixed_slide_draws_diagram_members_in_place():
     labels = [inner[i].text for s in shapes for i in s.block_ids]
     assert {"산업안전", "안전교육", "교육현황", "접수", "처리"} <= set(labels)
     assert sum(s.is_line for s in shapes) == 3 and any(s.tail_arrow for s in shapes)
+
+
+def _xlsx(tmp_path, sheet_xml: str, parts: dict[str, str], sheet_rels: str = "") -> Path:
+    """시트 하나짜리 최소 XLSX (시트 XML, 더할 부분들, 시트 관계)."""
+    import zipfile
+
+    ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' \
+         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"'
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    path = tmp_path / "t.xlsx"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml", '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" '
+                   'ContentType="application/vnd.openxmlformats-package.relationships+xml"/></Types>')
+        z.writestr("_rels/.rels", f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        z.writestr("xl/workbook.xml", f'<workbook {ns}><sheets><sheet name="예산" sheetId="1" r:id="rId1"/></sheets></workbook>')
+        z.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                   f'<Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>')
+        z.writestr("xl/worksheets/sheet1.xml", f"<worksheet {ns}>{sheet_xml}</worksheet>")
+        if sheet_rels:
+            z.writestr("xl/worksheets/_rels/sheet1.xml.rels",
+                       f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{sheet_rels}</Relationships>')
+        for name, xml in parts.items():
+            z.writestr(name, xml)
+    return path
+
+
+def test_xlsx_comments_links_header_footer_shapes(tmp_path):
+    # 예전에는 칸 메모, 하이퍼링크 주소, 인쇄 머리글·바닥글, 글상자 글이 경고 없이 빠졌다
+    from korean_parser.ir import Drawing, NoteRef, walk_blocks
+
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    sheet = ('<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>누리집</t></is></c>'
+             '<c r="B1" t="inlineStr"><is><t>본문표</t></is></c></row>'
+             '<row r="2"><c r="A2"><v>3</v></c></row></sheetData>'
+             '<hyperlinks><hyperlink ref="A1" r:id="rId9"/><hyperlink ref="B1" location="\'요약\'!A1"/></hyperlinks>'
+             '<headerFooter><oddHeader>&amp;L&amp;"맑은 고딕,굵게"&amp;12사업 보고서&amp;R&amp;A</oddHeader>'
+             '<oddFooter>&amp;C&amp;P / &amp;N쪽</oddFooter></headerFooter>'
+             '<drawing r:id="rId2"/><oleObjects><oleObject progId="Word.Document.12" shapeId="1"/></oleObjects>')
+    rels = (f'<Relationship Id="rId9" Type="{rel}/hyperlink" Target="https://www.data.go.kr" TargetMode="External"/>'
+            f'<Relationship Id="rId1" Type="{rel}/comments" Target="../comments1.xml"/>'
+            f'<Relationship Id="rId2" Type="{rel}/drawing" Target="../drawings/drawing1.xml"/>')
+    comments = ('<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>a</author>'
+                '</authors><commentList><comment ref="B1" authorId="0"><text><r><t>단위: 천원</t></r></text></comment>'
+                '<comment ref="C5" authorId="0"><text><t>빈 칸 메모</t></text></comment></commentList></comments>')
+    a = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+    drawing = ('<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" ' + a + '>'
+               '<xdr:twoCellAnchor><xdr:from/><xdr:to/><xdr:grpSp><xdr:sp><xdr:spPr><a:xfrm><a:off x="0" y="0"/>'
+               '<a:ext cx="1270000" cy="381000"/></a:xfrm><a:prstGeom prst="rect"/></xdr:spPr><xdr:txBody><a:p><a:r>'
+               '<a:t>※ 잠정치</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:grpSp></xdr:twoCellAnchor></xdr:wsDr>')
+    path = _xlsx(tmp_path, sheet, {"xl/comments1.xml": comments, "xl/drawings/drawing1.xml": drawing}, rels)
+    doc = parse(path)
+    table = next(b for b in doc.blocks if isinstance(b, Table))
+    a1, b1 = table.rows[0].cells[0].blocks[0], table.rows[0].cells[1].blocks[0]
+    assert a1.inlines[0].link == "https://www.data.go.kr" and b1.inlines[0].link == "#'요약'!A1"
+    assert isinstance(b1.inlines[-1], NoteRef)
+    assert [n.blocks[0].text for n in doc.notes.values()] == ["단위: 천원", "빈 칸 메모"]
+    assert all(n.kind == "comment" for n in doc.notes.values())
+    assert len(table.rows) == 5 and len(table.rows[0].cells) == 3  # 메모만 있는 C5까지 표에 남는다
+    assert [p.text for p in doc.header] == ["사업 보고서 예산"] and [p.text for p in doc.footer] == ["/ 쪽"]
+    drawing_block = next(b for b in doc.blocks if isinstance(b, Drawing))
+    assert [p.text for p in walk_blocks([drawing_block]) if isinstance(p, Paragraph)] == ["※ 잠정치"]
+    assert any("OLE" in w for w in doc.warnings)
+
+
+def test_xlsx_threaded_comments_win_and_no_cell_limit(tmp_path, monkeypatch):
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    rows = "".join(f'<row r="{r}"><c r="A{r}"><v>{r}</v></c></row>' for r in range(1, 31))
+    tc = ('<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments">'
+          '<threadedComment ref="A1" id="{1}" personId="{9}"><text>확인 필요</text></threadedComment>'
+          '<threadedComment ref="A1" id="{2}" personId="{9}" parentId="{1}"><text>확인함</text></threadedComment>'
+          '</ThreadedComments>')
+    legacy = ('<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><commentList>'
+              '<comment ref="A1"><text><t>[스레드 메모] 이 버전의 Excel에서는…</t></text></comment></commentList></comments>')
+    rels = (f'<Relationship Id="rId1" Type="{rel}/comments" Target="../comments1.xml"/>'
+            f'<Relationship Id="rId2" Type="http://schemas.microsoft.com/office/2017/10/relationships/threadedComment" '
+            f'Target="../threadedComments/threadedComment1.xml"/>')
+    path = _xlsx(tmp_path, f"<sheetData>{rows}</sheetData>",
+                 {"xl/comments1.xml": legacy, "xl/threadedComments/threadedComment1.xml": tc}, rels)
+    doc = parse(path)
+    assert [p.text for n in doc.notes.values() for p in n.blocks] == ["확인 필요", "확인함"]
+    assert len(next(b for b in doc.blocks if isinstance(b, Table)).rows) == 30 and not doc.warnings
+    monkeypatch.setenv("KP_XLSX_MAX_CELLS", "10")  # 메모리가 모자란 환경: 상한을 두면 앞부분만 넣고 경고
+    doc = parse(path)
+    assert len(next(b for b in doc.blocks if isinstance(b, Table)).rows) == 10
+    assert any("KP_XLSX_MAX_CELLS" in w for w in doc.warnings)

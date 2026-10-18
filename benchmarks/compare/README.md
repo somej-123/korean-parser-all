@@ -53,6 +53,7 @@ python benchmarks/compare/score.py --out benchmarks/compare/report.md      # 우
 - 기준 문서 보존율: HWP·HWPX·PDF·DOCX·PPTX는 우리 파서가 0.999~1.000으로 가장 높고 실패가 없다. 다른 파서가 크게
   잃은 곳은 그림 안 글(도식 PDF: Docling 0.06, kordoc·MarkItDown·PyMuPDF4LLM 0.02), 글자 겹침·덧말(HWP), 변환 실패였다.
   XLSX만 우리가 낮다 (0.938): 82만 칸 원자료를 칸 수 제한으로 앞부분만 넣었기 때문이다 (다른 파서는 모두 읽는다).
+  v1.4.0에서 상한을 없애 이 파일도 끝까지 읽는다 (위 숫자는 그 전 값).
 - 속도(중앙값): HWP·HWPX는 우리와 hwp-hwpx-parser가 0.01초로 가장 빠르고, DOCX는 우리가 가장 빠르다 (0.01초).
   PDF는 MarkItDown(0.11초)이 가장 빠르고 우리는 0.84초다.
 

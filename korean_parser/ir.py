@@ -19,7 +19,8 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, ConfigDict, Field
 
 
-IR_VERSION = "1.4"  # 1.2: Paragraph.heading_guess, 1.3: Image.converted_from, 1.4: FixedPage.shapes (PPTX 슬라이드)
+IR_VERSION = "1.5"  # 1.2: Paragraph.heading_guess, 1.3: Image.converted_from, 1.4: FixedPage.shapes (PPTX 슬라이드),
+#                    1.5: Note.kind "comment" (XLSX 칸 메모)
 
 
 class _Model(BaseModel):
@@ -361,7 +362,7 @@ class Image(_Model):
 
 
 class Note(_Model):
-    kind: Literal["footnote", "endnote"]
+    kind: Literal["footnote", "endnote", "comment"]  # comment: 칸 메모 (XLSX). 본문 자리에는 NoteRef
     label: str
     blocks: list[Block] = Field(default_factory=list)
 
