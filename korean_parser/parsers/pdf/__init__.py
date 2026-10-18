@@ -24,7 +24,7 @@ from ...ir import (
 )
 from ...normalize import is_hangul_syllable, normalize_text
 from ...outline import match_marker
-from .rules import build_grid, rule_regions
+from .rules import build_grid, inner_grid, rule_regions
 from .open_table import text_grid
 from .page import AMBIGUOUS_GAP, BBox, PageInfo, PdfPages, cluster, expand, inside_ratio, intersect, union
 
@@ -1252,6 +1252,12 @@ class PdfParser:
             prov = item.prov[0]
             page, box = self.pages.page(prov.page_no), self._box(prov, ddoc)
             grid = build_grid(page.rules, box)
+            if grid is None:
+                # 칸 안에 작은 표가 든 표: 긴 선만으로 바깥 표를 만든다 (칸 안에 실제로 작은 표가 있을 때만).
+                # 예전에는 괘선 표를 포기하고 표 인식 모델 결과를 써서, 모델이 칸에 넣지 못한 글이 경고 없이 빠졌다
+                outer = build_grid(page.rules, box, outer_only=True)
+                if outer is not None and any(self._inner_table(page, c.box) for c in outer.cells):
+                    grid = outer
             rows = item.data.num_rows if self.ocr else None  # 표 구조 모델을 돌리지 않았으면 행 수를 모른다
             if grid is None or not self._grid_fits(grid, page, box, rows):
                 if _is_toc(item):
@@ -1429,7 +1435,7 @@ class PdfParser:
     def _in_ruled_table(self, page_no: int, box: BBox) -> bool:
         return any(inside_ratio(box, expand(g, 1)) > 0.8 for g in self._ruled_boxes.get(page_no, []))
 
-    def _ruled_table(self, grid, page: PageInfo) -> Table:
+    def _ruled_table(self, grid, page: PageInfo, depth: int = 0) -> Table:
         gbox = (grid.xs[0], grid.ys[0], grid.xs[-1], grid.ys[-1])
         # 글 위치로 정한 격자(열린 표)는 선으로 읽은 격자보다 덜 확실하다
         table = Table(id=self._new_id(), prov=self._prov(page.number, gbox, confidence=1.0 if grid.source == "rules" else 0.8),
@@ -1443,7 +1449,10 @@ class PdfParser:
                        if inner[0] <= (c.box[0] + c.box[2]) / 2 <= inner[2] and inner[1] <= (c.box[1] + c.box[3]) / 2 <= inner[3]]
                 paragraphs = self._cell_paragraphs(self._ocr_lines(page.number, ocr)) if ocr else []
             else:
-                paragraphs = self._cell_paragraphs(page.text_lines(inner, pad=0))
+                nested = self._inner_table(page, gc.box) if depth < 2 else None
+                if nested is not None:
+                    cell.blocks = self._nested_cell(gc, inner, nested, page, depth)
+                paragraphs = [] if nested is not None else self._cell_paragraphs(page.text_lines(inner, pad=0))
             if paragraphs:
                 style, _ = self._text_style(page, inner) if not self.ocr else (None, None)
                 layout = self._cell_align(page, inner)
@@ -1462,6 +1471,30 @@ class PdfParser:
         table.col_widths_pt = [round(grid.xs[j + 1] - grid.xs[j], 1) for j in range(grid.n_cols)]
         table.cell_padding_pt = (1.5, 4, 1.5, 4)
         return table
+
+    @staticmethod
+    def _inner_table(page: PageInfo, box: BBox):
+        """칸 안에 선으로 그린 작은 표의 격자. 글이 든 칸이 둘 이상이어야 한다 (체크 상자 같은 작은 네모는 표가 아니다)."""
+        grid = inner_grid(page.rules, box)
+        if grid is None:
+            return None
+        filled = sum(1 for c in grid.cells if any(ch.text.strip() for ch in page.chars_in(c.box, 0)))
+        return grid if filled >= 2 else None
+
+    def _nested_cell(self, gc, inner: BBox, nested, page: PageInfo, depth: int) -> list[Block]:
+        """칸 안에 작은 표가 든 칸: 표 위의 글, 안쪽 표, 표 아래(와 옆)의 글 차례."""
+        nbox = (nested.xs[0], nested.ys[0], nested.xs[-1], nested.ys[-1])
+        above = (inner[0], inner[1], inner[2], nbox[1])
+        rest = page.text_lines(inner, pad=0, exclude=[expand(nbox, 1), above])
+        out: list[Block] = []
+        for lines in (page.text_lines(above, pad=0), None, rest):
+            if lines is None:
+                out.append(self._ruled_table(nested, page, depth + 1))
+                continue
+            for t in self._cell_paragraphs(lines):
+                out.append(Paragraph(id=self._new_id(), prov=self._prov(page.number, gc.box), inlines=[Text(text=t)],
+                                     style=self._cell_align(page, inner)))
+        return out
 
     @staticmethod
     def _cell_align(page: PageInfo, inner: BBox) -> ParagraphStyle | None:

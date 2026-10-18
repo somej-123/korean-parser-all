@@ -273,8 +273,39 @@ def edge_lines(path: Path) -> set[str]:
             tp = page.get_textpage()
             for top, bottom in ((h, h * 0.88), (h * 0.12, 0)):
                 out.update(norm(ln) for ln in tp.get_text_bounded(0, bottom, w, top).splitlines() if norm(ln))
+            out.update(_edge_pieces(tp, h))
         pdf.close()
     return out
+
+
+def _edge_pieces(tp, h: float) -> set[str]:
+    """쪽 위·아래 끝 줄을 크게 벌어진 자리(글자 높이의 2.5배 넘는 간격)에서 나눈 조각 (norm).
+
+    pdfium은 같은 높이의 글을 한 줄로 잇는다. 그래서 머리글 두 개('Part 02 · 사업자 부문 · …'과 오른쪽 끝의
+    '우리가 가면 건널목이 된다')가 한 줄이 되어, 장마다 바뀌는 앞 조각 때문에 뒤 조각까지 장마다 다시 세었다 (수기공모집 89쪽).
+    """
+    chars = []
+    for i in range(tp.count_chars()):
+        ch = tp.get_text_range(i, 1)
+        if not ch.strip():
+            continue
+        left, bottom, right, top = tp.get_charbox(i)
+        if top >= h * 0.88 or bottom <= h * 0.12:
+            chars.append((round((top + bottom) / 4) * 2, left, right, max(top - bottom, 1.0), ch))
+    out: set[str] = set()
+    lines: dict[float, list] = {}
+    for c in chars:
+        lines.setdefault(c[0], []).append(c)
+    for line in lines.values():
+        line.sort(key=lambda c: c[1])
+        piece = [line[0]]
+        for prev, c in zip(line, line[1:]):
+            if c[1] - prev[2] > 2.5 * max(prev[3], c[3]):
+                out.add(norm("".join(x[4] for x in piece)))
+                piece = []
+            piece.append(c)
+        out.add(norm("".join(x[4] for x in piece)))
+    return {p for p in out if p}
 
 
 def source_counter(pages: list[list[str]], edges: set[str] | None = None) -> collections.Counter:
@@ -291,6 +322,11 @@ def source_counter(pages: list[list[str]], edges: set[str] | None = None) -> col
     repeated = {k for k, c in seen.items() if c >= max(2, len(lines) / 2)} if len(lines) >= 2 else set()
     edge_keys = {key(ln) for ln in edges or ()}
     repeated |= {k for k, c in seen.items() if c >= 2 and k in edge_keys}
+    # 줄의 일부인 머리말 조각: 쪽 끝 줄(왼쪽·오른쪽 절반)이 두 쪽 이상에서 더 긴 줄 안에 들어 있으면, 처음 한 번만 센다
+    pieces = []
+    for k in sorted(edge_keys, key=len, reverse=True):  # 따로 한 줄인 쪽도 있는 조각(되풀이 줄)도 넣는다
+        if len(k) >= 4 and sum(1 for p in lines if any(k in key(ln) and k != key(ln) for ln in p)) >= 2:
+            pieces.append((k, re.compile(re.escape(k).replace(r"\#", r"\d+").replace("#", r"\d+"))))
     out: collections.Counter = collections.Counter()
     counted: set[str] = set()
     for p in lines:
@@ -301,6 +337,11 @@ def source_counter(pages: list[list[str]], edges: set[str] | None = None) -> col
                 if key(ln) in counted:
                     continue
                 counted.add(key(ln))
+            for k, pat in pieces:
+                if k in key(ln):
+                    if k in counted:
+                        ln = pat.sub("", ln, count=1)
+                    counted.add(k)
             out.update(ln)
     return out
 

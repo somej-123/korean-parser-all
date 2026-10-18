@@ -41,3 +41,12 @@ def test_size_limit_warning_is_an_exception_not_a_failure():
     assert "- 판정: **통과**" in text and "예외 (의도한 크기 제한에 걸려 경고를 남김): 1개" in text
     rows[0]["warnings"] = ["다른 경고"]
     assert "- 판정: **미달**" in report(rows, [])
+
+
+def test_running_head_piece_inside_a_longer_line_counts_once():
+    # 두 쪽을 펼친 PDF: pdfium이 장마다 바뀌는 머리글('Part 1 · 가')과 늘 같은 머리글('우리가 가면 건널목')을 한 줄로
+    # 이어 읽었다. 쪽 끝 줄을 크게 벌어진 자리에서 나눈 조각(edges)이 더 긴 줄 안에 있으면 처음 한 번만 센다 (수기공모집 0.988)
+    head = "우리가가면건널목"
+    pages = [["Part1·가" + head, "본문"], ["Part1·가" + head], ["Part2·나" + head], ["Part2·나" + head, head]]
+    counted = source_counter(pages, edges={"Part1·가" + head, "Part2·나" + head, "Part1·가", "Part2·나", head})
+    assert counted["널"] == 1 and counted["나"] == 1 and counted["가"] == 3  # 'Part1·가' 한 번 + '우리가가면' 한 번

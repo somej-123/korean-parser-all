@@ -160,8 +160,13 @@ def _near(lines: dict[float, list], pos: float, tol: float = 2.0):
 
 
 def build_grid(rules: list[Rule], box: tuple[float, float, float, float], pad: float = 4.0,
-               min_gap: float = 3.0) -> Grid | None:
-    """표 영역(box) 근처의 괘선으로 격자와 병합 칸을 만든다. 괘선 표가 아니면 None."""
+               min_gap: float = 3.0, outer_only: bool = False) -> Grid | None:
+    """표 영역(box) 근처의 괘선으로 격자와 병합 칸을 만든다. 괘선 표가 아니면 None.
+
+    outer_only: 표 너비(높이)의 절반 넘게 걸친 선만 쓴다. 칸 안에 작은 표가 든 표는 안쪽 표의 선까지 한 격자로 묶으면
+    사각형이 아닌 병합이 생겨 None이 되었다 (화물자동차 안전운임 운영지침: 할증률 표가 든 질의응답 표). 바깥 표를 이렇게
+    다시 만들고, 안쪽 표는 칸마다 `inner_grid`로 따로 만든다.
+    """
     bw, bh = box[2] - box[0], box[3] - box[1]
     # 쪽 테두리처럼 표보다 훨씬 긴 선은 뺀다
     rules = [r for r in rules if (r.b - r.a) <= 3 * (bw if r.axis == "h" else bh) + 20]
@@ -189,6 +194,20 @@ def build_grid(rules: list[Rule], box: tuple[float, float, float, float], pad: f
     left = min(a for spans in H.values() for a, _ in spans)
     right = max(b for spans in H.values() for _, b in spans)
     top, bottom = min(H), max(H)
+    if outer_only:
+        # 바깥 세로선: 표 높이의 절반 넘게 걸친 선. 바깥 가로선: 조각마다 양 끝이 바깥 세로선이나 표 양 끝에 닿는 선
+        # (안쪽 표의 가로선은 양 끝이 바깥 칸 안에 떠 있다)
+        V = {p: sp for p, sp in V.items()
+             if sum(max(0.0, min(b, bottom) - max(a, top)) for a, b in sp) >= 0.5 * (bottom - top)}
+        edges = [left, right] + list(V)
+
+        def anchored(sp):
+            return all(min(abs(a - e) for e in edges) <= 3 and min(abs(b - e) for e in edges) <= 3 for a, b in sp)
+
+        H = {p: sp for p, sp in H.items() if anchored(sp)}
+        if len(H) < 2:
+            return None
+        top, bottom = min(H), max(H)
     xs = sorted([left, right] + [p for p, spans in V.items() if left + min_gap < p < right - min_gap
                                  and _covered(spans, top, bottom, need=0.05)])
     ys = sorted(H)
@@ -247,6 +266,19 @@ def build_grid(rules: list[Rule], box: tuple[float, float, float, float], pad: f
                 gc.line_styles[side] = line_style(rules, axis, pos, a, b)
     cells.sort(key=lambda c: (c.r0, c.c0))
     return Grid(xs, ys, cells)
+
+
+def inner_grid(rules: list[Rule], box: tuple[float, float, float, float], margin: float = 1.5) -> Grid | None:
+    """칸(box) 안에 선으로 그린 작은 표의 격자. 칸의 테두리 선은 빼고, 칸 안에 들어 있는 선만으로 만든다."""
+    x0, y0, x1, y1 = box
+    sub = [r for r in rules if (r.axis == "h" and y0 + margin < r.pos < y1 - margin and r.a >= x0 - 1 and r.b <= x1 + 1)
+           or (r.axis == "v" and x0 + margin < r.pos < x1 - margin and r.a >= y0 - 1 and r.b <= y1 + 1)]
+    if sum(1 for r in sub if r.axis == "h") < 2 or sum(1 for r in sub if r.axis == "v") < 2:
+        return None
+    region = (min(r.a if r.axis == "h" else r.pos for r in sub), min(r.pos if r.axis == "h" else r.a for r in sub),
+              max(r.b if r.axis == "h" else r.pos for r in sub), max(r.pos if r.axis == "h" else r.b for r in sub))
+    grid = build_grid(sub, region, pad=1)
+    return grid if grid is not None and grid.n_rows >= 1 and grid.n_cols >= 2 else None
 
 
 def line_style(rules: list[Rule], axis: str, pos: float, a: float, b: float) -> tuple[str, float]:
