@@ -58,6 +58,7 @@ class Tag:
     SHAPE_COMPONENT_CONTAINER = TAG_BEGIN + 70
     CTRL_DATA = TAG_BEGIN + 71
     EQEDIT = TAG_BEGIN + 72
+    MEMO_LIST = TAG_BEGIN + 77  # 마지막 구역 끝: 메모 번호(u32). 뒤에 LIST_HEADER + 메모 글 문단이 온다
 
 
 @dataclass

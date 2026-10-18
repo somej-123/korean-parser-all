@@ -224,11 +224,10 @@ def _hwp_texts(path: Path) -> list[str]:
     f = HwpFile(path)
     out: list[str] = []
 
-    def walk(records, parent=None):
+    def walk(records):
         for r in records:
-            # 경고만 남기는 곳은 뺀다: 문단 바로 아래 달린 글 목록 (바탕쪽·숨은 설명은 v1.4부터 읽는다)
-            if r.tag == Tag.PARA_HEADER and parent is not None and parent.tag == Tag.PARA_HEADER:
-                continue
+            # 문단 바로 아래 달린 글 목록(구역 끝의 바탕쪽, 마지막 구역 끝의 메모 글)도 읽으므로 원문에 넣는다
+            # (v1.4.1까지는 경고만 남겨 뺐다)
             if r.tag == Tag.PARA_TEXT:
                 chars, i, buf = r.data.decode("utf-16-le", "replace"), 0, []
                 while i < len(chars):
@@ -242,7 +241,7 @@ def _hwp_texts(path: Path) -> list[str]:
             elif r.tag == Tag.CTRL_HEADER and ctrl_id(r.data) in ("tcps", "tdut"):
                 rd = Reader(r.data, 4)
                 out.append(rd.text() + (rd.text() if ctrl_id(r.data) == "tdut" else ""))
-            walk(r.children, r)
+            walk(r.children)
 
     for s in f.sections():
         walk(f.records(s))

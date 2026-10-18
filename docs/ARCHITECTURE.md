@@ -118,8 +118,15 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
   형제 문단 → hp:caption. 표는 TABLE 레코드 앞의 LIST_HEADER가 캡션이고 뒤가 칸이다.
 - 바탕쪽(구역 정의 아래 LIST_HEADER마다 문단들)은 secPr 안 masterPage/subList로, 숨은 설명(tcmt)은 hiddenComment로,
   자동 번호(atno: 속성 0~3비트 번호 종류, 4~11비트 번호 모양, 번호 u16, 사용자 기호·앞·뒤 장식 WCHAR)는 autoNum으로 옮겨
-  HWPX와 같은 코드로 읽는다 (v1.4.1). 문단 바로 아래 컨트롤 없이 달린 글 목록(hwplib etc.hwp, 메모·변경 기록으로 보이나
-  확인 못 함)의 글은 아직 읽지 않고 경고를 남긴다.
+  HWPX와 같은 코드로 읽는다 (v1.4.1).
+- 메모: 본문에는 메모가 붙은 자리에 필드 컨트롤만 있다. ctrl id는 '%%me'가 아니라 '%unk'이고 명령이
+  'MEMO/65535/번호/…', 명령·인스턴스 id 뒤에 메모 번호(INT32)가 붙는다. 메모 글은 마지막 구역 끝, 마지막 문단 바로
+  아래에 MEMO_LIST(태그 0x5D, 메모 번호 u32) + LIST_HEADER + 문단으로 모여 있다. 앞 구역의 필드도 이 글을 쓰므로 먼저
+  모으고, 필드는 HWPX처럼 fieldBegin type="MEMO" 안 subList로 옮긴다. DocInfo의 MEMO_SHAPE는 모양뿐이라 읽지 않는다.
+  확인한 표본: rhwp(MIT) samples/aift.hwp, 같은 문서의 aift.hwpx와 결과가 같다.
+- 마지막 문단 바로 아래 MEMO_LIST 없이 달린 LIST_HEADER + 문단은 구역의 '마지막 쪽'·'임의 쪽' 바탕쪽이다 (hwplib
+  ForSection, etc.hwp의 'D'). 구역 정의 아래 바탕쪽처럼 secPr 안 masterPage로 옮긴다. v1.4.1까지는 둘 다 메모로
+  짐작해 '본문 밖 글 목록(메모 등)의 글은 넣지 않음' 경고만 남겼다.
 - 문서 요약 정보(HwpSummaryInformation)는 직접 읽는다. olefile은 UTF-16 문자열 길이를 바이트로 읽어 뒤 속성까지 섞었다.
 - 실제 제안요청서 5개: 한컴오피스 미리보기 글 재현율 1.000, 본문 글자 수가 레코드 글자 수와 같다 (정규화로 바뀐 'ｏ'·'ㆍ' 등만 다름).
 
@@ -131,7 +138,7 @@ chunk.chunk(doc)                    ← 검색용 조각 (제목 경로, 표 보
   묶음 개체 안의 행렬은 이미 묶음 좌표계 기준이다.
 - 연결선의 `subjectIdx`(0 위, 1 오른쪽, 2 아래, 3 왼쪽)로 꺾인 연결선의 경로를 정한다.
 - 한글 메모(fieldBegin type="MEMO" 안의 subList)는 Note(kind="comment")로, 메모가 붙은 자리에 NoteRef (v1.4.0. 그 전에는
-  경고만). HWP(바이너리) 메모는 표본이 없어 확인하지 못해 경고만 남긴다.
+  경고만). HWP(바이너리) 메모도 같은 모양으로 옮겨 읽는다 (위 'HWP 5.0 파싱에서 알아 둘 점').
 - 머리말·꼬리말은 첫 양쪽·홀수 쪽 것이 화면용이고, 짝수 쪽이나 다른 구역의 것도 글이 다르면 뒤에 함께 담는다
   (예전에는 버려서 짝수 쪽 머리말 글이 경고 없이 빠졌다).
 - 개체 캡션(`hp:caption/hp:subList`)은 개체 안이 아니라 따로 있다. 개체 바로 뒤(side=TOP이면 바로 앞) 문단으로 둔다.

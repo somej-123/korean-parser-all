@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from korean_parser.ir import Break, Drawing, Heading, Paragraph, Tab, Table
+from korean_parser.ir import Break, Drawing, Heading, NoteRef, Paragraph, Tab, Table
 from korean_parser.parsers.hwp import HwpParser
 from korean_parser.parsers.hwp.records import Tag, build_tree, read_records
 
@@ -392,3 +392,54 @@ def test_hwp_caption_hidden_comment_and_master_page():
     assert [n.blocks[0].text for n in doc.notes.values()] == ["숨은 글"]
     assert [(b.style_name, b.text) for b in doc.header] == [("master_page", "바탕쪽 글")]
     assert not any("숨은 글" in t or "바탕쪽 글" in t for _, t in kinds)
+
+
+def memo_field(number: int, with_index: bool = True) -> bytes:
+    """메모 필드: 한글은 %unk 컨트롤에 'MEMO/65535/번호/…' 명령, 인스턴스 id, 메모 번호를 저장한다 (rhwp aift.hwp)."""
+    data = b"knu%" + struct.pack("<IB", 0x8001, 0) + wtext(f"MEMO/65535/{number}/1517431184/3") + struct.pack("<I", 7)
+    return rec(Tag.CTRL_HEADER, 1, data + (struct.pack("<i", number) if with_index else b""))
+
+
+def test_hwp_memo_and_last_page_master():
+    # 메모 글은 마지막 구역 끝(마지막 문단 바로 아래)에 MEMO_LIST(메모 번호) + LIST_HEADER + 문단으로 모여 있고,
+    # 본문에는 메모가 붙은 자리에 %unk 필드만 있다. HWPX 메모처럼 Note(kind="comment")와 붙은 자리의 NoteRef.
+    # MEMO_LIST 없이 달린 LIST_HEADER + 문단은 구역의 '마지막 쪽' 바탕쪽이다 (hwplib etc.hwp). v1.4.1까지는 둘 다 경고만
+    secd = rec(Tag.CTRL_HEADER, 1, b"dces" + struct.pack("<IHHHIH", 0, 0, 0, 0, 8000, 1) + bytes(20))
+    data = para(0, ctrl(2, "secd") + "본문", extra=secd)
+    data += para(0, "가" + ctrl(3, "%unk") + "첫 자리" + ctrl(4) + " 나", extra=memo_field(1))
+    # 메모 번호가 없는 필드는 명령의 세 번째 값으로 찾는다
+    data += para(0, ctrl(3, "%unk") + "둘째 자리" + ctrl(4), extra=memo_field(2, with_index=False))
+    tail = rec(Tag.LIST_HEADER, 1, struct.pack("<iII", 1, 0, 0)) + para(1, "마지막 쪽 바탕")
+    for number, text in ((1, "첫 메모 글"), (2, "둘째 메모 글")):
+        tail += rec(Tag.MEMO_LIST, 1, struct.pack("<I", number))
+        tail += rec(Tag.LIST_HEADER, 1, struct.pack("<iIII", 1, 0, 0, 0)) + para(1, text)
+    data += para(0, "끝", extra=tail)
+    doc = HwpParser("memo.hwp", file=FakeFile(data)).parse()
+    assert not doc.warnings
+    memos = {k: (n.label, [b.text for b in n.blocks]) for k, n in doc.notes.items() if n.kind == "comment"}
+    assert memos == {"cm1": ("메모1", ["첫 메모 글"]), "cm2": ("메모2", ["둘째 메모 글"])}
+    texts = [b.text for b in doc.blocks]
+    assert texts == ["본문", "가첫 자리 나", "둘째 자리", "끝"]
+    refs = [[i.note_id for i in b.inlines if isinstance(i, NoteRef)] for b in doc.blocks]
+    assert refs == [[], ["cm1"], ["cm2"], []]
+    assert [(b.style_name, b.text) for b in doc.header] == [("master_page", "마지막 쪽 바탕")]
+
+
+def test_hwp_memo_without_text_warns():
+    # 메모 글을 찾지 못하면 (MEMO_LIST가 없다) 경고를 남긴다
+    data = para(0, "가" + ctrl(3, "%unk") + "자리" + ctrl(4), extra=memo_field(3))
+    doc = HwpParser("memo.hwp", file=FakeFile(data)).parse()
+    assert doc.warnings == ["메모 글을 찾지 못함 (메모 3)"]
+    assert not doc.notes
+
+
+MEMO_SAMPLE = Path(__file__).resolve().parents[1] / "samples_rfp" / "hwp_memo" / "aift.hwp"
+
+
+@pytest.mark.skipif(not MEMO_SAMPLE.exists(), reason="메모 표본 없음 (rhwp samples/aift.hwp를 samples_rfp/hwp_memo/에)")
+def test_hwp_memo_real_sample():
+    # rhwp(MIT)의 samples/aift.hwp: 한글이 저장한 메모 2개. 같은 문서의 HWPX(samples/hwpx/aift.hwpx)와 같은 결과
+    doc = HwpParser(MEMO_SAMPLE).parse()
+    assert not any("메모" in w or "글 목록" in w for w in doc.warnings)
+    memos = [(n.label, [b.text for b in n.blocks]) for n in doc.notes.values() if n.kind == "comment"]
+    assert memos == [("메모1", ["기업 소개 및 본 과제 관련 기술력 소개"]), ("메모2", ["기업 소개 및 본 과제 관련 기술력 소개"])]

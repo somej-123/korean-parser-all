@@ -204,6 +204,28 @@ def _has_text(paras: list[Record]) -> bool:
     return False
 
 
+def _tail_lists(p: Record) -> tuple[list[list[Record]], dict[int, list[Record]]]:
+    """문단 바로 아래(컨트롤 없이) 달린 글 목록을 나눈다. 구역의 마지막 문단 뒤에만 온다 (hwplib ForSection·HWPReader).
+
+    - LIST_HEADER + 문단: 구역의 '마지막 쪽'·'임의 쪽' 바탕쪽 (hwplib etc.hwp의 'D')
+    - MEMO_LIST(메모 번호) + LIST_HEADER + 문단: 메모 글. 마지막 구역 끝에 문서의 메모가 모두 모여 있고, 본문에는
+      메모가 붙은 자리에 필드(%unk, 명령 'MEMO/…')만 있다 (rhwp samples/aift.hwp)
+    """
+    pages: list[list[Record]] = []
+    memos: dict[int, list[Record]] = {}
+    cur, prev = None, None
+    for r in p.children:
+        if r.tag == Tag.MEMO_LIST:
+            cur = memos.setdefault(Reader(r.data).u32(), [])
+        elif r.tag == Tag.LIST_HEADER and prev != Tag.MEMO_LIST:
+            pages.append([])
+            cur = pages[-1]
+        elif r.tag == Tag.PARA_HEADER and cur is not None:
+            cur.append(r)
+        prev = r.tag
+    return pages, memos
+
+
 class _DocInfo:
     """DocInfo 레코드를 HWPX header.xml 모양의 XML로 옮긴다. 그림 목록(id → 스트림 이름, 압축 여부)도 모은다."""
 
@@ -370,12 +392,25 @@ class _DocInfo:
 class _Body:
     """본문 레코드(문단 나무)를 HWPX section.xml 모양의 XML로 옮긴다."""
 
-    def __init__(self, warn):
+    def __init__(self, warn, memos: dict[int, list[Record]] | None = None):
+        """memos: 메모 번호 → 메모 글 문단 (마지막 구역 끝에 있어 앞 구역의 메모 필드도 쓰므로 미리 모은다)."""
         self.warn = warn
+        self.memos = memos or {}
 
     def section(self, records: list[Record]):
         sec = etree.Element("sec")
-        self._paragraphs(sec, [r for r in records if r.tag == Tag.PARA_HEADER])
+        paras = [r for r in records if r.tag == Tag.PARA_HEADER]
+        self._paragraphs(sec, paras)
+        # 구역 끝의 바탕쪽(마지막 쪽·임의 쪽): 구역 정의 아래 바탕쪽처럼 secPr 안 masterPage/subList로 옮긴다
+        # (v1.4.1까지는 메모로 짐작해 경고만 남겼다)
+        pages = [g for p in paras for g in _tail_lists(p)[0] if _has_text(g)]
+        if pages:
+            sec_pr = next(sec.iter("secPr"), None)
+            if sec_pr is None:
+                self.warn("구역 정의가 없는 구역의 바탕쪽 글은 넣지 않음")
+            else:
+                for g in pages:
+                    self._paragraphs(_sub(_sub(sec_pr, "masterPage"), "subList"), g)
         _link_connectors(sec)
         return sec
 
@@ -384,9 +419,6 @@ class _Body:
             parent.append(self._paragraph(p))
 
     def _paragraph(self, p: Record):
-        if _has_text(p.kids(Tag.PARA_HEADER)):
-            # 문단 바로 아래(컨트롤 없이) 달린 LIST_HEADER + 문단: 메모·변경 기록으로 보이나 확인하지 못했다 (hwplib etc.hwp)
-            self.warn("본문 밖 글 목록(메모 등)의 글은 넣지 않음")
         rd = Reader(p.data)
         rd.u32()
         rd.u32()  # 컨트롤 마스크
@@ -533,6 +565,20 @@ class _Body:
             rd.u32()
             rd.u8()
             command = rd.text()
+            if cid in ("%unk", "%%me") and command.startswith("MEMO/"):
+                # 메모: 한글은 %unk 필드(명령 'MEMO/65535/번호/…')로 저장한다. 명령·인스턴스 id 뒤의 메모 번호로
+                # 마지막 구역 끝의 메모 글(MEMO_LIST)을 찾아 HWPX처럼 fieldBegin type="MEMO" 안 subList로 옮긴다
+                rd.u32()  # 인스턴스 id
+                index = rd.i32() if rd.left() >= 4 else None
+                if index is None:  # 메모 번호가 없으면 명령의 세 번째 값
+                    parts = command.split("/")
+                    index = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else -1
+                begin = _sub(_sub(run, "ctrl"), "fieldBegin", type="MEMO")
+                if index in self.memos:
+                    self._paragraphs(_sub(begin, "subList"), self.memos[index])
+                else:
+                    self.warn(f"메모 글을 찾지 못함 (메모 {index})")
+                return
             begin = _sub(_sub(run, "ctrl"), "fieldBegin", type="HYPERLINK" if cid == "%hlk" else cid.strip("%"))
             if cid == "%hlk":
                 _sub(_sub(begin, "parameters"), "stringParam", name="Command").text = command
@@ -952,9 +998,13 @@ class HwpParser(HwpxParser):
         style0 = self.header.styles.get("0")
         if style0 is not None and style0.char_ref in self.header.char_styles:
             self.doc.default_text_style = self.header.char_styles[style0.char_ref]
-        body = _Body(self._warn)
-        for name in self.file.sections():
-            sec = body.section(self.file.records(name))
+        sections = [self.file.records(name) for name in self.file.sections()]
+        # 메모 글은 마지막 구역 끝에 모여 있어 앞 구역의 메모 필드보다 늦게 나온다: 먼저 모은다
+        memos = {k: v for records in sections for r in records if r.tag == Tag.PARA_HEADER
+                 for k, v in _tail_lists(r)[1].items()}
+        body = _Body(self._warn, memos)
+        for records in sections:
+            sec = body.section(records)
             self.doc.blocks.extend(self._paragraphs(sec))
         self.file.close()
         return self.doc

@@ -129,7 +129,8 @@ python benchmarks/goal/check.py --skip-eval --out goal_report.md  # 기준 1만
 `benchmarks/goal/check.py`로 재는 것이다 (특히 실제 업무 DOCX, 나라장터 공고 첨부 파일).
 
 - 메모는 v1.4.0에서 읽는다 (HWPX 한글 메모, Word 메모와 답글, XLSX 칸 메모, PPTX 슬라이드 메모 → Note(kind="comment")).
-  바탕쪽(머리말 뒤)과 숨은 설명(메모 목록)은 v1.4.1에서 읽는다. HWP(바이너리) 메모는 표본이 없어 아직 경고만 남긴다
+  바탕쪽(머리말 뒤)과 숨은 설명(메모 목록)은 v1.4.1에서 읽는다. HWP(바이너리) 메모와 구역 끝의 '마지막 쪽' 바탕쪽은
+  v1.4.1 뒤에 읽는다 (표본: rhwp samples/aift.hwp, hwplib etc.hwp)
 - HWP 차트의 종류(막대·꺾은선 등)와 모양: v1.0에서는 데이터 표만 (종류를 확인할 표본이 하나뿐)
 
 - 스캔 PDF의 OCR 빈칸으로 생긴 공백 ('요구 사항'): 두 방법을 시험했으나 나아지지 않았다 (HANDOFF)
