@@ -1,3 +1,16 @@
+# 작업 인계
+
+## 지금 상태 (2026-10-18, v1.0.0)
+
+v1.0 완료 기준(`docs/GOAL.md`)을 모두 통과해서 1.0.0으로 확정했다. 다음 일과 미룬 일은 `docs/GOAL.md`의 'v1.0 이후'에 있다.
+지켜야 할 방향: GPU 없이 CPU로 돌린다. 품질이 먼저이고, 속도는 품질이 같은 방법끼리 고를 때만 본다.
+
+- 측정: `python benchmarks/goal/check.py --out goal_report.md` (기준 1·2·3 한 번에)
+- 다른 파서와 비교: `benchmarks/compare/README.md`
+- 실제 문서 모으기: `benchmarks/corpus/fetch_datagokr.py` (공공데이터포털, 받은 파일은 `samples_rfp/`에만)
+
+아래는 2026-10-16(v0.7.2) 인계 때의 기록이다.
+
 # 작업 인계 (2026-10-16, v0.7.2)
 
 클라우드 세션에서 하던 작업을 로컬 PC로 옮기며 남기는 기록이다. 프로젝트 규칙은 루트의 `CLAUDE.md`에 있다.
