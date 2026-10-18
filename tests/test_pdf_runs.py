@@ -208,3 +208,31 @@ def test_bullet_lines_and_table_titles_are_not_titles():
     kinds = [(type(b).__name__, getattr(b, "text", "")) for b in parser.doc.blocks]
     assert kinds[0] == ("Paragraph", "< 생활제품 측정 결과 >")  # 표 바로 앞: 표 제목
     assert kinds[2] == ("Heading", "< 추진 배경 >") and kinds[5] == ("Heading", "< 붙임 >")  # 표 앞이 아니면 그대로
+
+
+def test_row_split_at_page_break_is_joined():
+    # 쪽이 바뀌는 곳에서 나뉜 행: 다음 쪽 첫 행은 첫 칸이 비고 앞 행에 글이 있던 칸에만 남은 글이 있다 (법무부 현황 4곳,
+    # TEDS 0.978). 세로 병합 칸이 쪽을 넘는 온전한 행(첫 칸만 빔)은 붙이지 않는다
+    from korean_parser.ir import Cell, Document, PageBreak, Paragraph, Provenance, Row, Table, Text
+    from korean_parser.parsers.pdf import PdfParser
+
+    def row(*texts):
+        return Row(cells=[Cell(blocks=[Paragraph(id="p", inlines=[Text(text=t)])] if t else []) for t in texts])
+
+    def table(page, *rows):
+        return Table(id=f"t{page}", prov=Provenance(parser="t", page=page, bbox=(50, 80, 540, 700)),
+                     col_widths_pt=[50, 100, 200, 90], rows=list(rows))
+
+    parser = PdfParser.__new__(PdfParser)
+    parser.doc = Document()
+    parser.doc.blocks = [table(1, row("연번", "기관", "주소", "전화"), row("1", "가", "서울시 중구", "02-123-"),
+                               row("2", "나", "부산시", "051-1")),
+                         PageBreak(id="b2"), table(2, row("", "", "세종대로 1", "4567"), row("3", "다", "대구시", "053-2")),
+                         PageBreak(id="b3"), table(3, row("", "라", "광주시", "062-3"))]
+    parser.doc.blocks[0].rows[2] = row("2", "나", "부산시 중앙대로", "051-1")
+    parser.doc.blocks[0].rows.insert(2, parser.doc.blocks[0].rows.pop(1))  # 1행을 쪽 끝으로
+    parser._merge_split_tables()
+    rows = [[" ".join(p.text for p in c.blocks) for c in r.cells] for r in parser.doc.blocks[0].rows]
+    assert rows[2] == ["1", "가", "서울시 중구 세종대로 1", "02-123-4567"]  # 나뉜 행은 붙인다
+    assert rows[-1] == ["", "라", "광주시", "062-3"]  # 첫 칸만 빈 온전한 행은 그대로
+    assert len(rows) == 5

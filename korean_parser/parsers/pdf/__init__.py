@@ -142,6 +142,41 @@ def _not_a_title(text: str) -> bool:
                 or _BULLET_LINE.match(t))
 
 
+def _join_split_row(prev, cont, rows) -> bool:
+    """다음 쪽 첫 행이 앞 쪽 마지막 행의 나머지면 그 글을 앞 행 칸에 붙이고 True.
+
+    쪽이 바뀌는 곳에서 한 행이 나뉘면 다음 쪽 첫 행은 첫 칸(연번 등)이 비고, 앞 행에 글이 있던 칸(주소·전화번호)에만
+    남은 글이 있다 (법무부 조기적응지원센터 현황: 나뉜 행 4개, 그중 하나는 빈 행). 세로 병합 칸이 쪽을 넘는 경우와
+    구별하려고 다음을 모두 본다: 칸 수가 같고 병합 칸이 없다, 다음 행의 첫 칸이 비고 앞 행의 첫 칸은 차 있다, 다음 행에서
+    글이 있는 칸은 앞 행에서도 글이 있다, 다음 행에서 글이 있는 칸이 표의 다른 행보다 훨씬 적다 (절반 이하).
+    병합 칸이 쪽을 넘는 행은 첫 칸만 비고 나머지 칸이 다 찬 온전한 행이다.
+    """
+    if len(prev.cells) != len(cont.cells) or len(prev.cells) < 2:
+        return False
+    if any(c.row_span != 1 or c.col_span != 1 for c in prev.cells + cont.cells):
+        return False
+    pt, ct = _row_texts(prev), _row_texts(cont)
+    if ct[0] or not pt[0] or any(c and not p for p, c in zip(pt, ct)):
+        return False
+    filled = sorted(sum(1 for t in _row_texts(r) if t) for r in rows if len(r.cells) == len(prev.cells))
+    if not any(ct) and 0 in filled:
+        return False  # 빈 행이 원래 있는 표(빈칸 양식)의 빈 행은 나뉜 행이 아닐 수 있다
+    if not filled or sum(1 for t in ct if t) * 2 > filled[len(filled) // 2]:
+        return False
+    for pc, cc, text in zip(prev.cells, cont.cells, ct):
+        if not text:
+            continue
+        last = pc.blocks[-1] if pc.blocks else None
+        first = cc.blocks[0] if cc.blocks else None
+        if isinstance(last, Paragraph) and isinstance(first, Paragraph):
+            glue = "" if last.text.endswith("-") else " "  # '053-593-' + '1511'
+            last.inlines = [*last.inlines, Text(text=glue), *first.inlines] if glue else [*last.inlines, *first.inlines]
+            pc.blocks.extend(cc.blocks[1:])
+        else:
+            pc.blocks.extend(cc.blocks)
+    return True
+
+
 def _same_table(a, b, last_page: int | None = None) -> bool:
     """쪽을 넘어 이어지는 같은 표인가: 다음 쪽 표이고 열 수와 열 너비가 같다.
 
@@ -883,6 +918,8 @@ class PdfParser:
                     k += 1  # 되풀이한 머리 행 (한 줄 이상)
                 if k == len(rows):
                     k = 0  # 다음 쪽 표 전체가 앞 표의 머리와 같으면 머리 행이 아니라 내용이다
+                if k < len(rows) and b.rows and _join_split_row(b.rows[-1], rows[k], b.rows):
+                    k += 1  # 쪽이 바뀌는 곳에서 나뉜 행: 남은 글을 앞 행에 붙였다
                 b.rows.extend(rows[k:])
                 last_page = nxt.prov.page
                 out.extend(blocks[i:j])  # 쪽 나눔 표시는 이은 표 뒤로
